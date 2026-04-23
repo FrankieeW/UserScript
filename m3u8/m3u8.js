@@ -3,1195 +3,1653 @@
 // @name:zh-CN   m3u8视频侦测下载器【自动嗅探】
 // @name:zh-TW   m3u8視頻偵測下載器【自動嗅探】
 // @name:en      M3U8 Video Detector and Downloader
-// @version      0.1.0
-// @description  自动检测页面m3u8视频并进行完整下载。检测到m3u8链接后会自动出现在页面右上角位置，点击下载即可跳转到m3u8下载器。
-// @description:zh-CN  自动检测页面m3u8视频并进行完整下载。检测到m3u8链接后会自动出现在页面右上角位置，点击下载即可跳转到m3u8下载器。
-// @description:zh-TW  自動檢測頁面m3u8視頻並進行完整下載。檢測到m3u8鏈接後會自動出現在頁面右上角位置，點擊下載即可跳轉到m3u8下載器。
-// @description:en  Automatically detect the m3u8 video of the page and download it completely. Once detected the m3u8 link, it will appear in the upper right corner of the page. Click download to jump to the m3u8 downloader.
+// @version      0.2.0
+// @description  自动检测页面m3u8视频并支持用本地下载器或播放器打开，支持在脚本内配置本地应用。
+// @description:zh-CN  自动检测页面m3u8视频并支持用本地下载器或播放器打开，支持在脚本内配置本地应用。
+// @description:zh-TW  自動檢測頁面m3u8視頻並支持用本地下載器或播放器打開，支持在腳本內配置本地應用。
+// @description:en  Detect m3u8 and direct video URLs, then open them with configurable local downloaders and players.
 // @icon         https://tools.thatwind.com/favicon.png
 // @author       Frankie
 // @namespace    https://tools.thatwind.com/
 // @homepage     https://github.com/FrankieeW/UserScript
 // @match        *://*/*
 // @exclude      *://www.diancigaoshou.com/*
-// @require      https://cdn.jsdelivr.net/npm/m3u8-parser@7.2.0/dist/m3u8-parser.min.js
 // @connect      *
 // @grant        unsafeWindow
-// @grant        GM_openInTab
-// @grant        GM.openInTab
 // @grant        GM_getValue
 // @grant        GM.getValue
 // @grant        GM_setValue
 // @grant        GM.setValue
-// @grant        GM_deleteValue
-// @grant        GM.deleteValue
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
-// @grant        GM_download
 // @run-at       document-start
-// @downloadURL https://raw.githubusercontent.com/FrankieeW/UserScript/main/m3u8/m3u8.user.js
-// @updateURL https://raw.githubusercontent.com/FrankieeW/UserScript/main/m3u8/m3u8.user.js
+// @downloadURL https://raw.githubusercontent.com/FrankieeW/UserScript/main/m3u8/m3u8.js
+// @updateURL https://raw.githubusercontent.com/FrankieeW/UserScript/main/m3u8/m3u8.js
 // ==/UserScript==
 
-(function () {
-    'use strict';
+const DEFAULT_SETTINGS = Object.freeze({
+    scanMode: 'light',
+    commandBridgeUrl: 'http://127.0.0.1:3210',
+    commandBridgeToken: '',
+    downloaderPreset: 'browser-download',
+    downloaderName: 'Downloader',
+    downloaderTemplate: 'native:download',
+    primaryPlayerPreset: 'iina-protocol',
+    primaryPlayerName: 'IINA',
+    primaryPlayerTemplate: 'iina://open?url={{url}}',
+    secondaryPlayerPreset: 'vlc-protocol',
+    secondaryPlayerName: 'VLC',
+    secondaryPlayerTemplate: 'vlc://{{rawUrl}}'
+});
 
-    const T_langs = {
-        "en": {
-            play: "Play",
-            copy: "Copy Link",
-            copied: "Copied",
-            download: "Download",
-            stop: "Stop",
-            downloading: "Downloading",
-            multiLine: "Multi",
-            mins: "mins",
-            with: "with"
-        },
-        "zh-CN": {
-            play: '播放',
-            copy: "复制链接",
-            copied: "已复制",
-            download: "下载",
-            stop: "停止",
-            downloading: "下载中",
-            multiLine: "多轨",
-            mins: "分钟",
-            with: "用"
-        }
+const LAUNCHER_PRESETS = Object.freeze({
+    downloader: Object.freeze({
+        custom: { name: 'Custom', template: '' },
+        'browser-download': { name: 'Browser Download', template: 'native:download' },
+        'browser-open': { name: 'Open In Browser', template: 'native:open' },
+        'fdm-protocol': { name: 'FDM Protocol', template: 'fdm://{{rawUrl}}' },
+        'fdm-cli': { name: 'FDM CLI', template: 'cmd:fdm {{rawUrl}}' }
+    }),
+    player: Object.freeze({
+        custom: { name: 'Custom', template: '' },
+        none: { name: 'Disabled', template: '' },
+        'iina-protocol': { name: 'IINA Protocol', template: 'iina://open?url={{url}}' },
+        'iina-cli': { name: 'IINA CLI', template: 'cmd:open -a IINA {{rawUrl}}' },
+        'vlc-protocol': { name: 'VLC Protocol', template: 'vlc://{{rawUrl}}' },
+        'vlc-cli': { name: 'VLC CLI', template: 'cmd:open -a VLC {{rawUrl}}' },
+        'mpv-cli': { name: 'mpv CLI', template: 'cmd:mpv {{rawUrl}}' },
+        'potplayer-cli': { name: 'PotPlayer CLI', template: 'cmd:PotPlayerMini64.exe {{rawUrl}}' },
+        'browser-open': { name: 'Open In Browser', template: 'native:open' }
+    })
+});
+
+function findPresetKey(groupName, template) {
+    const presets = LAUNCHER_PRESETS[groupName];
+    const normalizedTemplate = String(template || '').trim();
+    const entry = Object.entries(presets).find(([, preset]) => preset.template === normalizedTemplate);
+    return entry ? entry[0] : 'custom';
+}
+
+function normalizeSettings(value) {
+    const raw = value && typeof value === 'object' ? value : {};
+    const downloaderTemplate = typeof raw.downloaderTemplate === 'string' ? raw.downloaderTemplate.trim() : DEFAULT_SETTINGS.downloaderTemplate;
+    const primaryPlayerTemplate = typeof raw.primaryPlayerTemplate === 'string' ? raw.primaryPlayerTemplate.trim() : DEFAULT_SETTINGS.primaryPlayerTemplate;
+    const secondaryPlayerTemplate = typeof raw.secondaryPlayerTemplate === 'string' ? raw.secondaryPlayerTemplate.trim() : DEFAULT_SETTINGS.secondaryPlayerTemplate;
+    return {
+        scanMode: raw.scanMode === 'full' ? 'full' : DEFAULT_SETTINGS.scanMode,
+        commandBridgeUrl: typeof raw.commandBridgeUrl === 'string' && raw.commandBridgeUrl.trim() ? raw.commandBridgeUrl.trim() : DEFAULT_SETTINGS.commandBridgeUrl,
+        commandBridgeToken: typeof raw.commandBridgeToken === 'string' ? raw.commandBridgeToken.trim() : DEFAULT_SETTINGS.commandBridgeToken,
+        downloaderPreset: typeof raw.downloaderPreset === 'string' && LAUNCHER_PRESETS.downloader[raw.downloaderPreset]
+            ? raw.downloaderPreset
+            : findPresetKey('downloader', downloaderTemplate),
+        downloaderName: typeof raw.downloaderName === 'string' && raw.downloaderName.trim() ? raw.downloaderName.trim() : DEFAULT_SETTINGS.downloaderName,
+        downloaderTemplate,
+        primaryPlayerPreset: typeof raw.primaryPlayerPreset === 'string' && LAUNCHER_PRESETS.player[raw.primaryPlayerPreset]
+            ? raw.primaryPlayerPreset
+            : findPresetKey('player', primaryPlayerTemplate),
+        primaryPlayerName: typeof raw.primaryPlayerName === 'string' && raw.primaryPlayerName.trim() ? raw.primaryPlayerName.trim() : DEFAULT_SETTINGS.primaryPlayerName,
+        primaryPlayerTemplate,
+        secondaryPlayerPreset: typeof raw.secondaryPlayerPreset === 'string' && LAUNCHER_PRESETS.player[raw.secondaryPlayerPreset]
+            ? raw.secondaryPlayerPreset
+            : findPresetKey('player', secondaryPlayerTemplate),
+        secondaryPlayerName: typeof raw.secondaryPlayerName === 'string' && raw.secondaryPlayerName.trim() ? raw.secondaryPlayerName.trim() : DEFAULT_SETTINGS.secondaryPlayerName,
+        secondaryPlayerTemplate
     };
-    let l = navigator.language || "en";
-    if (l.startsWith("en-")) l = "en";
-    else if (l.startsWith("zh-")) l = "zh-CN";
-    else l = "en";
-    const T = T_langs[l] || T_langs["zh-CN"];
+}
 
-    if (location.host.endsWith('mail.qq.com')) {
-        // 修复 @DostGit 提出的在qq邮箱无限刷新问题
-        return;
+function parseManifestSummary(content) {
+    const text = String(content || '');
+    const trimmed = text.trim();
+    let duration = 0;
+    let playlistCount = 0;
+    let segmentCount = 0;
+
+    for (const line of text.split(/\r?\n/)) {
+        if (line.startsWith('#EXTINF:')) {
+            const durationText = line.slice('#EXTINF:'.length).split(',')[0];
+            const seconds = Number.parseFloat(durationText);
+            if (Number.isFinite(seconds)) duration += seconds;
+            segmentCount += 1;
+        } else if (line.startsWith('#EXT-X-STREAM-INF')) {
+            playlistCount += 1;
+        }
     }
 
-    const mgmapi = {
-
-        addStyle(s) {
-            let style = document.createElement("style");
-            style.innerHTML = s;
-            document.documentElement.appendChild(style);
-        },
-        async getValue(name, defaultVal) {
-            return await ((typeof GM_getValue === "function") ? GM_getValue : GM.getValue)(name, defaultVal);
-        },
-        async setValue(name, value) {
-            return await ((typeof GM_setValue === "function") ? GM_setValue : GM.setValue)(name, value);
-        },
-        async deleteValue(name) {
-            return await ((typeof GM_deleteValue === "function") ? GM_deleteValue : GM.deleteValue)(name);
-        },
-        openInTab(url, open_in_background = false) {
-            return ((typeof GM_openInTab === "function") ? GM_openInTab : GM.openInTab)(url, open_in_background);
-        },
-        xmlHttpRequest(details) {
-            return ((typeof GM_xmlhttpRequest === "function") ? GM_xmlhttpRequest : GM.xmlHttpRequest)(details);
-        },
-        download(details) {
-            const self = this;
-            const url = details.url;
-            const filename = details.name || 'download.mp4';
-
-            // 提取回调函数，并提供默认空函数防止报错
-            const reportProgress = details.reportProgress || function () { };
-            const onComplete = details.onComplete || function () { };
-            const onError = details.onError || function () { };
-            const onStop = details.onStop || function () { };
-
-            // 状态标记
-            let isCancelled = false;
-            let currentAbortController = null; // 用于策略2 (Fetch)
-            let currentGmRequest = null;       // 用于策略3 (GM_xmlhttpRequest)
-
-            // 定义取消函数
-            const cancel = () => {
-                if (isCancelled) return;
-                isCancelled = true;
-                console.log("用户触发取消操作。");
-
-                // 中断 Fetch 请求
-                if (currentAbortController) {
-                    currentAbortController.abort();
-                }
-                // 中断 GM 请求
-                if (currentGmRequest && typeof currentGmRequest.abort === 'function') {
-                    currentGmRequest.abort();
-                }
-
-                onStop();
-            };
-
-            // 内部执行异步逻辑
-            (async () => {
-                if (isCancelled) return;
-
-                // ============================================================
-                // 策略 1: 同域检查 (Same-Origin Check)
-                // ============================================================
-                const currentOrigin = window.location.origin;
-                let targetOrigin;
-                try {
-                    targetOrigin = new URL(url).origin;
-                } catch (e) {
-                    onError(new Error(`无效的 URL: ${url}`));
-                    return;
-                }
-
-                if (currentOrigin === targetOrigin) {
-                    console.log("策略1: 检测到同域，使用 <a> 标签下载");
-                    // 同域下载通常无法监听进度，直接视为完成
-                    reportProgress(100);
-                    triggerAnchorDownload(url, filename);
-                    onComplete();
-                    return;
-                }
-
-                // ============================================================
-                // 策略 2: 尝试 CORS 请求 + 流式写入 (Fetch + FileSystem API)
-                // ============================================================
-                const supportsFileSystem = typeof unsafeWindow.showSaveFilePicker === 'function';
-                let isCorsSupported = false;
-
-                if (supportsFileSystem && !isCancelled) {
-                    try {
-                        // 探测 CORS 支持情况
-                        currentAbortController = new AbortController();
-                        const response = await fetch(url, {
-                            method: 'GET',
-                            signal: currentAbortController.signal,
-                            headers: details.headers || {}
-                        });
-
-                        // 如果能拿到响应，说明支持 CORS (即使是 404 等错误，也说明网络通了且允许跨域)
-                        // 注意：这里我们立即中断，因为只是为了探测
-                        isCorsSupported = true;
-                        currentAbortController.abort();
-                        currentAbortController = null; // 重置
-
-                    } catch (error) {
-                        if (error.name === 'AbortError') {
-                            // 如果是我们主动中断的，说明请求发出去了，CORS 支持
-                            isCorsSupported = true;
-                        } else {
-                            console.log("策略2检测: 目标不支持 CORS 或网络错误。", error);
-                        }
-                    }
-                }
-
-                if (isCancelled) return;
-
-                // 执行策略 2
-                if (supportsFileSystem && isCorsSupported) {
-                    console.log("策略2: 支持 CORS 且支持文件系统 API，尝试流式下载");
-                    try {
-                        await streamDownload(url, filename, details.headers);
-                        return; // 成功则退出
-                    } catch (err) {
-                        if (isCancelled || err.name === 'AbortError') {
-                            console.log("下载被取消 (策略2)");
-                            onStop();
-                            return;
-                        }
-                        console.error("策略2执行失败，降级到策略3:", err);
-                        // 失败后继续向下执行策略 3
-                    }
-                }
-
-                if (isCancelled) return;
-
-                // ============================================================
-                // 策略 3: GM_xmlhttpRequest (mgmapi) 代理下载
-                // ============================================================
-                console.log("策略3: 使用 GM_xmlhttpRequest 下载");
-                gmDownload(details);
-
-            })();
-
-            // ============================================================
-            // 辅助函数定义 (内部作用域)
-            // ============================================================
-
-            function triggerAnchorDownload(blobUrl, name) {
-                const element = document.createElement('a');
-                element.setAttribute('href', blobUrl);
-                element.setAttribute('download', name);
-                element.style.display = 'none';
-                document.body.appendChild(element);
-                element.click();
-                document.body.removeChild(element);
-                if (blobUrl.startsWith('blob:')) {
-                    setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-                }
-            }
-
-            async function streamDownload(url, name, headers) {
-                // 1. 弹出保存对话框
-                let handle;
-                try {
-                    handle = await unsafeWindow.showSaveFilePicker({
-                        suggestedName: name,
-                        types: [{
-                            description: 'Video File',
-                            accept: { 'video/mp4': ['.mp4'], 'application/octet-stream': ['.bin', '.ts'] }
-                        }],
-                    });
-                } catch (e) {
-                    // 用户取消了保存框
-                    if (e.name === 'AbortError') throw e;
-                    throw new Error("无法打开文件保存对话框");
-                }
-
-                if (isCancelled) throw new Error('AbortError');
-
-                // 2. 创建写入流
-                const writable = await handle.createWritable();
-
-                // 3. 发起真正的下载请求
-                currentAbortController = new AbortController();
-                let response;
-                try {
-                    response = await fetch(url, {
-                        headers: headers || {},
-                        signal: currentAbortController.signal
-                    });
-                } catch (e) {
-                    await writable.close(); // 确保关闭文件流
-                    throw e;
-                }
-
-                if (!response.body) {
-                    await writable.close();
-                    throw new Error('ReadableStream not supported.');
-                }
-
-                const reader = response.body.getReader();
-                const contentLength = +response.headers.get('Content-Length');
-                let receivedLength = 0;
-
-                // 4. 读取流并写入
-                try {
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        await writable.write(value);
-
-                        receivedLength += value.length;
-                        if (contentLength) {
-                            const percent = ((receivedLength / contentLength) * 100).toFixed(2);
-                            reportProgress(parseFloat(percent));
-                        } else {
-                            // 无法计算百分比时，也可以选择传 -1 或仅打印日志
-                            console.log(`[StreamDownload] 已下载: ${receivedLength} bytes`);
-                        }
-                    }
-                    // 下载完成
-                    await writable.close();
-                    onComplete();
-                    // self.message("下载完成 (FileSystem API)", 3000);
-
-                } catch (err) {
-                    // 发生错误或取消时，尝试关闭流
-                    try { await writable.close(); } catch (e) { }
-                    // 如果是取消，抛出 AbortError 以便上层捕获
-                    if (err.name === 'AbortError' || isCancelled) {
-                        throw new Error('AbortError');
-                    }
-                    throw err;
-                } finally {
-                    currentAbortController = null;
-                }
-            }
-
-            function gmDownload(opt) {
-                // 保存请求对象以便取消
-                currentGmRequest = mgmapi.xmlHttpRequest({
-                    method: "GET",
-                    url: opt.url,
-                    responseType: 'blob',
-                    headers: opt.headers || {},
-                    onload(res) {
-                        if (isCancelled) return;
-                        if (res.status >= 200 && res.status < 300) {
-                            const blob = res.response;
-                            const url = URL.createObjectURL(blob);
-                            triggerAnchorDownload(url, opt.name);
-
-                            reportProgress(100);
-                            onComplete();
-                            self.message("下载完成，正在保存...", 3000);
-                        } else {
-                            onError(new Error(`请求失败，状态码: ${res.status}`));
-                            // self.message("下载失败", 3000);
-                        }
-                    },
-                    onprogress(e) {
-                        if (isCancelled) return;
-                        if (e.lengthComputable && e.total > 0) {
-                            const percent = ((e.loaded / e.total) * 100).toFixed(2);
-                            reportProgress(parseFloat(percent));
-                        }
-                    },
-                    onerror(err) {
-                        if (isCancelled) return;
-                        onError(err);
-                        // self.message("网络错误，下载失败", 3000);
-                    },
-                    onabort() {
-                        console.log("GM_Download 请求已中止");
-                    }
-                });
-            }
-
-            // 立即返回控制对象
-            return { cancel };
-        },
-
-
-        copyText(text) {
-            return copyTextToClipboard(text);
-            async function copyTextToClipboard(text) {
-                // 复制文本
-                try {
-                    await navigator.clipboard.writeText(text);
-                } catch (e) {
-                    var copyFrom = document.createElement("textarea");
-                    copyFrom.textContent = text;
-                    document.body.appendChild(copyFrom);
-                    copyFrom.select();
-                    document.execCommand('copy');
-                    copyFrom.blur();
-                    document.body.removeChild(copyFrom);
-                }
-
-            }
-        },
-        message(text, disappearTime = 5000) {
-            const id = "f8243rd238-gm-message-panel";
-            let p = document.querySelector(`#${id}`);
-            if (!p) {
-                p = document.createElement("div");
-                p.id = id;
-                p.style = `
-                    position: fixed;
-                    bottom: 20px;
-                    right: 20px;
-                    display: flex;
-                    flex-direction: column;
-                    align-items: end;
-                    z-index: 999999999999999;
-                `;
-                (document.body || document.documentElement).appendChild(p);
-            }
-            let mdiv = document.createElement("div");
-            mdiv.innerText = text;
-            mdiv.style = `
-                padding: 3px 8px;
-                border-radius: 5px;
-                background: black;
-                box-shadow: #000 1px 2px 5px;
-                margin-top: 10px;
-                font-size: small;
-                color: #fff;
-                text-align: right;
-            `;
-            p.appendChild(mdiv);
-            setTimeout(() => {
-                p.removeChild(mdiv);
-            }, disappearTime);
-        },
-        waitEle(selector) {
-            return new Promise(resolve => {
-                while (true) {
-                    let ele = document.querySelector(selector);
-                    if (ele) {
-                        resolve(ele);
-                        break;
-                    }
-                    sleep(200);
-                }
-            });
-        }
+    return {
+        isManifest: trimmed.startsWith('#EXTM3U'),
+        duration: duration > 0 ? duration : null,
+        playlistCount,
+        segmentCount
     };
+}
 
-
-    if (location.host === "tools.thatwind.com" || location.host === "localhost:3000") {
-        mgmapi.addStyle("#userscript-tip{display:none !important;}");
-
-        let hostNeedsProxy = new Set();
-
-        // 对请求做代理
-        const _fetch = unsafeWindow.fetch;
-        unsafeWindow.fetch = async function (...args) {
-            let hostname = new URL(args[0]).hostname;
-
-            if (hostNeedsProxy.has(hostname)) {
-                return await mgmapiFetch(...args);
-            }
-
-            try {
-                let response = await _fetch(...args);
-                if (response.status !== 200) throw new Error(response.status);
-                return response;
-            } catch (e) {
-                // 失败请求使用代理
-                if (args.length == 1) {
-                    console.log(`域名 ${hostname} 需要请求代理，url示例：${args[0]}`);
-                    hostNeedsProxy.add(hostname);
-                    return await mgmapiFetch(...args);
-                } else {
-                    throw e;
-                }
-            }
+function fillTemplate(template, values) {
+    return String(template || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, key) => {
+        if (Object.prototype.hasOwnProperty.call(values, key)) {
+            return values[key];
         }
-
-        function mgmapiFetch(...args) {
-            return new Promise((resolve, reject) => {
-                let referer = new URLSearchParams(location.hash.slice(1)).get("referer");
-                let headers = {};
-                if (referer) {
-                    referer = new URL(referer);
-                    headers = {
-                        "origin": referer.origin,
-                        "referer": referer.href
-                    };
-                }
-                mgmapi.xmlHttpRequest({
-                    method: "GET",
-                    url: args[0],
-                    responseType: 'arraybuffer',
-                    headers,
-                    onload(r) {
-                        resolve({
-                            status: r.status,
-                            headers: new Headers(r.responseHeaders.split("\n").filter(n => n).map(s => s.split(/:\s*/)).reduce((all, [a, b]) => { all[a] = b; return all; }, {})),
-                            async text() {
-                                return r.responseText;
-                            },
-                            async arrayBuffer() {
-                                return r.response;
-                            }
-                        });
-                    },
-                    onerror() {
-                        reject(new Error());
-                    }
-                });
-            });
-        }
-
-        return;
-    }
-
-
-    // iframe 信息交流
-    // 目前只用于获取顶部标题
-    window.addEventListener("message", async (e) => {
-        if (e.data === "3j4t9uj349-gm-get-title") {
-            let name = `top-title-${Date.now()}`;
-            await mgmapi.setValue(name, document.title);
-            e.source.postMessage(`3j4t9uj349-gm-top-title-name:${name}`, "*");
-        }
+        return '';
     });
+}
 
-    
+function hasTemplatePlaceholder(template) {
+    return /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/.test(String(template || ''));
+}
 
-    {
+function isCommandTemplate(template) {
+    return String(template || '').trim().startsWith('cmd:');
+}
 
-        const _r_text = unsafeWindow.Response.prototype.text;
-        unsafeWindow.Response.prototype.text = function () {
-            return new Promise((resolve, reject) => {
-                _r_text.call(this).then((text) => {
-                    resolve(text);
-                    if (checkContent(text)) doM3U({ url: this.url, content: text });
-                }).catch(reject);
-            });
+function normalizeCommandTemplate(template) {
+    const normalized = String(template || '').trim();
+    if (!normalized) return '';
+    if (!isCommandTemplate(normalized)) return '';
+    const commandBody = normalized.slice(4).trim();
+    if (!commandBody) return '';
+    if (hasTemplatePlaceholder(commandBody)) return commandBody;
+    return `${commandBody} {{rawUrl}}`;
+}
+
+function normalizeTemplateForLaunch(template) {
+    const normalized = String(template || '').trim();
+    if (!normalized) return '';
+    if (isCommandTemplate(normalized)) return '';
+    if (normalized === 'native:download' || normalized === 'native:open') return normalized;
+    if (hasTemplatePlaceholder(normalized)) return normalized;
+    if (normalized.endsWith('://')) return `${normalized}{{rawUrl}}`;
+    return '';
+}
+
+function looksLikeM3u8Url(value) {
+    if (!value) return false;
+    const text = String(value);
+    return /\.m3u8(?:$|[?#&])/i.test(text) || /[?&][^=]*m3u8=/i.test(text);
+}
+
+function resolveRequestUrl(input, baseUrl) {
+    if (!input) return '';
+    const candidate = typeof input === 'string'
+        ? input
+        : typeof input.url === 'string'
+            ? input.url
+            : String(input);
+
+    try {
+        return new URL(candidate, baseUrl || 'https://example.invalid/').href;
+    } catch {
+        return '';
+    }
+}
+
+function inferDownloadName(urlText, fallbackExtension) {
+    try {
+        const url = new URL(urlText);
+        const lastSegment = url.pathname.split('/').filter(Boolean).pop();
+        if (lastSegment) {
+            if (/\.[a-z0-9]{2,8}$/i.test(lastSegment)) return decodeURIComponent(lastSegment);
+            if (fallbackExtension) return `${decodeURIComponent(lastSegment)}${fallbackExtension}`;
+            return decodeURIComponent(lastSegment);
         }
-
-        const _open = unsafeWindow.XMLHttpRequest.prototype.open;
-        unsafeWindow.XMLHttpRequest.prototype.open = function (...args) {
-            this.addEventListener("load", () => {
-                try {
-                    let content = this.responseText;
-                    if (checkContent(content)) doM3U({ url: args[1], content });
-                } catch { }
-            });
-            // checkUrl(args[1]);
-            return _open.apply(this, args);
-        }
-
-        function checkContent(content) {
-            if (content.trim().startsWith("#EXTM3U")) {
-                return true;
-            }
-        }
-
-        // 检查纯视频
-        setInterval(doVideos, 1000);
-
+    } catch {
+        // Ignore parsing errors and use the fallback below.
     }
 
-    const rootDiv = document.createElement("div");
-    rootDiv.style = `
-        position: fixed;
-        z-index: 9999999999999999;
-        opacity: 0.9;
-    `;
-    rootDiv.style.display = "none";
-    document.documentElement.appendChild(rootDiv);
+    const extension = fallbackExtension || '.bin';
+    return `download${extension}`;
+}
 
-    const shadowDOM = rootDiv.attachShadow({ mode: 'open' });
-    const wrapper = document.createElement("div");
-    shadowDOM.appendChild(wrapper);
-
-
-    // 指示器
-    const bar = document.createElement("div");
-    bar.style = `
-        text-align: right;
-    `;
-    bar.innerHTML = `
-        <span
-            class="number-indicator"
-            data-number="0"
-            style="
-                display: inline-flex;
-                width: 25px;
-                height: 25px;
-                background: black;
-                padding: 10px;
-                border-radius: 100px;
-                margin-bottom: 5px;
-                cursor: pointer;
-                border: 3px solid #83838382;
-            "
-        >
-            <svg
-            style="
-                filter: invert(1);
-            "
-            version="1.1" id="Capa_1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" x="0px" y="0px" viewBox="0 0 585.913 585.913" style="enable-background:new 0 0 585.913 585.913;" xml:space="preserve">
-                <g>
-                    <path d="M11.173,46.2v492.311l346.22,47.402V535.33c0.776,0.058,1.542,0.109,2.329,0.109h177.39
-                    c20.75,0,37.627-16.883,37.627-37.627V86.597c0-20.743-16.877-37.628-37.627-37.628h-177.39c-0.781,0-1.553,0.077-2.329,0.124V0
-                    L11.173,46.2z M110.382,345.888l-1.37-38.273c-0.416-11.998-0.822-26.514-0.822-41.023l-0.415,0.01
-                    c-2.867,12.767-6.678,26.956-10.187,38.567l-10.961,38.211l-15.567-0.582l-9.239-37.598c-2.801-11.269-5.709-24.905-7.725-37.361
-                    l-0.25,0.005c-0.503,12.914-0.879,27.657-1.503,39.552L50.84,343.6l-17.385-0.672l5.252-94.208l25.415-0.996l8.499,32.064
-                    c2.724,11.224,5.467,23.364,7.428,34.819h0.389c2.503-11.291,5.535-24.221,8.454-35.168l9.643-33.042l27.436-1.071l5.237,101.377
-                    L110.382,345.888z M172.479,349.999c-12.569-0.504-23.013-4.272-28.539-8.142l4.504-17.249c3.939,2.226,13.1,6.445,22.373,6.687
-                    c12.009,0.32,18.174-5.497,18.174-13.218c0-10.068-9.838-14.683-19.979-14.74l-9.253-0.052v-16.777l8.801-0.066
-                    c7.708-0.208,17.646-3.262,17.646-11.905c0-6.121-4.914-10.562-14.635-10.331c-7.95,0.189-16.245,3.914-20.213,6.446l-4.52-16.693
-                    c5.693-4.008,17.224-8.11,29.883-8.588c21.457-0.795,33.643,10.407,33.643,24.625c0,11.029-6.197,19.691-18.738,24.161v0.314
-                    c12.229,2.216,22.266,11.663,22.266,25.281C213.89,338.188,197.866,351.001,172.479,349.999z M331.104,302.986
-                    c0,36.126-19.55,52.541-51.193,51.286c-29.318-1.166-46.019-17.103-46.019-52.044v-61.104l25.711-1.006v64.201
-                    c0,19.191,7.562,29.146,21.179,29.502c14.234,0.368,22.189-8.976,22.189-29.26v-66.125l28.122-1.097v65.647H331.104z
-                    M359.723,70.476h177.39c8.893,0,16.125,7.236,16.125,16.126v411.22c0,8.888-7.232,16.127-16.125,16.127h-177.39
-                    c-0.792,0-1.563-0.116-2.329-0.232V380.782c17.685,14.961,40.504,24.032,65.434,24.032c56.037,0,101.607-45.576,101.607-101.599
-                    c0-56.029-45.581-101.603-101.607-101.603c-24.93,0-47.749,9.069-65.434,24.035V70.728
-                    C358.159,70.599,358.926,70.476,359.723,70.476z M390.873,364.519V245.241c0-1.07,0.615-2.071,1.586-2.521
-                    c0.981-0.483,2.13-0.365,2.981,0.307l93.393,59.623c0.666,0.556,1.065,1.376,1.065,2.215c0,0.841-0.399,1.67-1.065,2.215
-                    l-93.397,59.628c-0.509,0.4-1.114,0.61-1.743,0.61l-1.233-0.289C391.488,366.588,390.873,365.585,390.873,364.519z" />
-                </g>
-            </svg>
-        </span>
-    `;
-
-    wrapper.appendChild(bar);
-
-    // 样式
-    const style = document.createElement("style");
-
-    style.innerHTML = `
-        .number-indicator{
-            position:relative;
-        }
-
-        .number-indicator::after{
-            content: attr(data-number);
-            position: absolute;
-            bottom: 0;
-            right: 0;
-            color: #40a9ff;
-            font-size: 14px;
-            font-weight: bold;
-            background: #000;
-            border-radius: 10px;
-            padding: 3px 5px;
-        }
-
-        .copy-link:active{
-            color: #ccc;
-        }
-
-        .download-btn:hover{
-            text-decoration: underline;
-        }
-        .download-btn:active{
-            opacity: 0.9;
-        }
-
-        .stop-btn:hover{
-            text-decoration: underline;
-        }
-        .stop-btn:active{
-            opacity: 0.9;
-        }
-
-        .m3u8-item{
-            color: white;
-            margin-bottom: 5px;
-            display: flex;
-            flex-direction: row;
-            background: black;
-            padding: 5px 10px;
-            border-radius: 5px;
-            font-size: 14px;
-            user-select: none;
-        }
-
-        [data-shown="false"] {
-            opacity: 0.8;
-            zoom: 0.8;
-        }
-
-        [data-shown="false"]:hover{
-            opacity: 1;
-        }
-
-        [data-shown="false"] .m3u8-item{
-            display: none;
-        }
-
-    `;
-
-    wrapper.appendChild(style);
-
-
-
-
-    const barBtn = bar.querySelector(".number-indicator");
-
-    // 关于显隐和移动
-
-    (async function () {
-
-        let shown = await GM_getValue("shown", true);
-        wrapper.setAttribute("data-shown", shown);
-
-
-        let x = await GM_getValue("x", 10);
-        let y = await GM_getValue("y", 10);
-
-        x = Math.min(innerWidth - 50, x);
-        y = Math.min(innerHeight - 50, y);
-
-        if (x < 0) x = 0;
-        if (y < 0) y = 0;
-
-        rootDiv.style.top = `${y}px`;
-        rootDiv.style.right = `${x}px`;
-
-        barBtn.addEventListener("mousedown", e => {
-            let startX = e.pageX;
-            let startY = e.pageY;
-
-            let moved = false;
-
-            let mousemove = e => {
-                let offsetX = e.pageX - startX;
-                let offsetY = e.pageY - startY;
-                if (moved || (Math.abs(offsetX) + Math.abs(offsetY)) > 5) {
-                    moved = true;
-                    rootDiv.style.top = `${y + offsetY}px`;
-                    rootDiv.style.right = `${x - offsetX}px`;
-                }
-            };
-            let mouseup = e => {
-
-                let offsetX = e.pageX - startX;
-                let offsetY = e.pageY - startY;
-
-                if (moved) {
-                    x -= offsetX;
-                    y += offsetY;
-                    mgmapi.setValue("x", x);
-                    mgmapi.setValue("y", y);
-                } else {
-                    shown = !shown;
-                    mgmapi.setValue("shown", shown);
-                    wrapper.setAttribute("data-shown", shown);
-                }
-
-                removeEventListener("mousemove", mousemove);
-                removeEventListener("mouseup", mouseup);
-            }
-            addEventListener("mousemove", mousemove);
-            addEventListener("mouseup", mouseup);
-        });
-    })();
-
-
-    let count = 0;
-    let shownUrls = [];
-
-
-    function doVideos() {
-        for (let v of Array.from(document.querySelectorAll("video"))) {
-            if (v.duration && v.src && v.src.startsWith("http") && (!shownUrls.includes(v.src))) {
-                const src = v.src;
-
-                shownUrls.push(src);
-                showVideo({
-                    type: "video",
-                    url: new URL(src),
-                    duration: `${Math.ceil(v.duration * 10 / 60) / 10} ${T.mins}`,
-                    download() {
-                        openWithLocalApp(src, 'fdm');
-                    }
-                })
-            }
-        }
-    }
-
-    async function doM3U({ url, content }) {
-
-        url = new URL(url);
-
-        if (shownUrls.includes(url.href)) return;
-
-        // 解析 m3u
-        content = content || await (await fetch(url)).text();
-
-        const parser = new m3u8Parser.Parser();
-        parser.push(content);
-        parser.end();
-        const manifest = parser.manifest;
-
-        if (manifest.segments) {
-            let duration = 0;
-            manifest.segments.forEach((segment) => {
-                duration += segment.duration;
-            });
-            manifest.duration = duration;
-        }
-
-        showVideo({
-            type: "m3u8",
-            url,
-            duration: manifest.duration ? `${Math.ceil(manifest.duration * 10 / 60) / 10} ${T.mins}` : manifest.playlists ? `${T.multiLine}(${manifest.playlists.length})` : "未知(unknown)",
-            download() {
-                openWithLocalApp(url.href, 'fdm');
-            },
-            play() {
-                openWithLocalApp(url.href, 'iina') || openWithLocalApp(url.href, 'vlc');
-            }
-        })
-
-    }
-
-    function showVideo({
-        type,
-        url,
-        duration,
-        download,
-        play
-    }) {
-        let div = document.createElement("div");
-        div.className = "m3u8-item";
-        div.innerHTML = `
-            <span ${type == "m3u8" ? "style=\"color:#40a9ff\"" : ""}>${type}</span>
-            <span
-                title="${url}"
-                style="
-                    color: #ccc;
-                    font-size: small;
-                    max-width: 200px;
-                    text-overflow: ellipsis;
-                    white-space: nowrap;
-                    overflow: hidden;
-                    margin-left: 10px;
-                "
-            >${url.pathname}</span>
-            <span 
-                style="
-                    color: #ccc;
-                    margin-left: 10px;
-                    flex-grow: 1;
-                "
-            >${duration}</span>
-            <span
-                class="copy-link"
-                title="${url}"
-                style="
-                    margin-left: 10px;
-                    cursor: pointer;
-                "
-            >${T.copy}</span>
-            <span
-                class="download-btn"
-                style="
-                    margin-left: 10px;
-                    cursor: pointer;
-            ">${T.download}</span>
-            ${play ? `<span
-                class="play-btn"
-                style="
-                    margin-left: 10px;
-                    cursor: pointer;
-            ">${T.play}</span>` : ''}
-            <span>
-                <span
-                    class="progress"
-                    style="
-                        display: none;
-                        margin-left: 10px;
-                    "
-                ></span>
-            <span
-                class="stop-btn"
-                style="
-                    display: none;
-                    margin-left: 10px;
-                    cursor: pointer;
-            ">${T.stop}</span>
-        `;
-
-
-
-        let cancelDownload;
-
-        let downloadBtn = div.querySelector(".download-btn");
-        let playBtn = div.querySelector(".play-btn");
-        let stopBtn = div.querySelector(".stop-btn");
-        let progressText = div.querySelector(".progress");
-
-        div.querySelector(".copy-link").addEventListener("click", () => {
-            // 复制链接
-            mgmapi.copyText(url.href);
-            mgmapi.message(T.copied, 2000);
-        });
-
-        downloadBtn.addEventListener("click", download);
-        if (playBtn) playBtn.addEventListener("click", play);
-
-        stopBtn.addEventListener("click", () => {
-            cancelDownload && cancelDownload();
-        });
-
-        rootDiv.style.display = "block";
-
-        count++;
-
-        shownUrls.push(url.href);
-
-        bar.querySelector(".number-indicator").setAttribute("data-number", count);
-
-        wrapper.appendChild(div);
-
-        return {
-            updateDownloadState({ downloading, progress, cancel }) {
-                if (downloading) {
-                    if (cancel) cancelDownload = cancel;
-                    downloadBtn.style.display = "none";
-                    progressText.style.display = "";
-                    progressText.textContent = `${T.downloading} ${progress}%`;
-                    stopBtn.style.display = "";
-                } else {
-                    cancelDownload = null;
-                    downloadBtn.style.display = "";
-                    progressText.style.display = "none";
-                    stopBtn.style.display = "none";
-                }
-            }
-        }
-    }
-
-    const localApps = {
-        iina: {
-            scheme: 'iina://open?url=',
-            label: 'IINA'
-        },
-        vlc: {
-            scheme: 'vlc://',
-            label: 'VLC'
-        },
-        fdm: {
-            scheme: '',
-            label: 'FDM'
-        }
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = {
+        DEFAULT_SETTINGS,
+        fillTemplate,
+        hasTemplatePlaceholder,
+        inferDownloadName,
+        isCommandTemplate,
+        LAUNCHER_PRESETS,
+        looksLikeM3u8Url,
+        findPresetKey,
+        normalizeCommandTemplate,
+        normalizeTemplateForLaunch,
+        normalizeSettings,
+        parseManifestSummary,
+        resolveRequestUrl
     };
+}
 
-    // 尝试用协议 URL 打开本地应用，不支持则降级到 open 命令
-    function openWithLocalApp(url, appKey) {
-        const app = localApps[appKey];
-        if (!app) return false;
+if (typeof window !== 'undefined') {
+    (function () {
+        'use strict';
 
-        const encodedUrl = encodeURIComponent(url);
-        const schemeUrl = app.scheme + encodedUrl;
+        const SETTINGS_KEY = 'wtmzjk-local-app-settings';
+        const PANEL_SHOWN_KEY = 'wtmzjk-panel-shown';
+        const PANEL_X_KEY = 'wtmzjk-panel-x';
+        const PANEL_Y_KEY = 'wtmzjk-panel-y';
 
-        // 先尝试通过 a 标签触发协议（协议可用时走这条路）
-        const a = document.createElement('a');
-        a.href = schemeUrl;
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-
-        // 设置一个很短的延时后检查窗口状态，如果窗口没变化说明协议不被支持，尝试用命令行
-        setTimeout(() => {
-            // 如果窗口焦点没变化，说明协议可能不工作，尝试命令行
-            // macOS 下用 open 命令
-            const cmdMap = {
-                iina: `osascript -e 'open location "${schemeUrl}"'`,
-                vlc: `osascript -e 'open location "${schemeUrl}"'`,
-                fdm: `open -a "Free Download Manager" "${url}"`
-            };
-            const cmd = cmdMap[appKey];
-            if (cmd) {
-                mgmapi.xmlHttpRequest({
-                    method: 'GET',
-                    url: `data:text/plain;base64,${btoa(cmd)}`,
-                    onload() {}
-                });
+        const T_langs = {
+            en: {
+                play: 'Play',
+                copy: 'Copy Link',
+                copied: 'Copied',
+                download: 'Download',
+                stop: 'Stop',
+                downloading: 'Downloading',
+                multiLine: 'Multi',
+                mins: 'mins',
+                settings: 'Settings',
+                scanMode: 'Scan Mode',
+                scanModeLight: 'Light Scan',
+                scanModeFull: 'Full Scan',
+                scanModeHint: 'Light mode focuses on network URLs and video tags. Full mode also scans page links and dynamic attributes.',
+                bridgeUrl: 'Bridge URL',
+                bridgeToken: 'Bridge Token',
+                bridgeHint: 'Use cmd:fdm {{rawUrl}} to launch local commands through the bridge.',
+                downloaderPreset: 'Downloader Preset',
+                playerPreset: 'Player Preset',
+                presetHint: 'Choose a preset and then keep editing the template if needed.',
+                save: 'Save',
+                cancel: 'Cancel',
+                reset: 'Reset',
+                settingsTitle: 'Local App Settings',
+                settingsHint: 'Use {{url}} for encoded URLs, {{rawUrl}} for raw URLs, {{title}} for the page title.',
+                downloaderName: 'Downloader Name',
+                downloaderTemplate: 'Downloader Template',
+                primaryPlayerName: 'Primary Player Name',
+                primaryPlayerTemplate: 'Primary Player Template',
+                secondaryPlayerName: 'Secondary Player Name',
+                secondaryPlayerTemplate: 'Secondary Player Template',
+                openFailed: 'No local app template configured. Link copied.',
+                saved: 'Settings saved',
+                resetDone: 'Settings reset',
+                copiedAsFallback: 'Link copied as fallback',
+                nativeDownload: 'Using browser download fallback',
+                invalidTemplate: 'Template must include {{rawUrl}} or {{url}}',
+                bridgeLaunchFailed: 'Local bridge launch failed',
+                bridgeTokenMissing: 'Bridge token is required for cmd: templates',
+                sentToBridge: 'Sent to local bridge',
+                unknown: 'Unknown',
+                configExample: 'Example: iina://open?url={{url}}'
+            },
+            'zh-CN': {
+                play: '播放',
+                copy: '复制链接',
+                copied: '已复制',
+                download: '下载',
+                stop: '停止',
+                downloading: '下载中',
+                multiLine: '多轨',
+                mins: '分钟',
+                settings: '设置',
+                scanMode: '扫描模式',
+                scanModeLight: '轻量扫描',
+                scanModeFull: '全面扫描',
+                scanModeHint: '轻量模式只盯网络 URL 和 video 标签；全面模式会额外扫描页面链接和动态属性。',
+                bridgeUrl: '桥接地址',
+                bridgeToken: '桥接令牌',
+                bridgeHint: '使用 cmd:fdm {{rawUrl}} 这种写法，通过本地桥接执行命令。',
+                downloaderPreset: '下载器预设',
+                playerPreset: '播放器预设',
+                presetHint: '先选预设，再按需继续编辑模板。',
+                save: '保存',
+                cancel: '取消',
+                reset: '重置',
+                settingsTitle: '本地应用设置',
+                settingsHint: '模板支持 {{url}}(编码后 URL)、{{rawUrl}}(原始 URL)、{{title}}(页面标题)。',
+                downloaderName: '下载器名称',
+                downloaderTemplate: '下载器模板',
+                primaryPlayerName: '主播放器名称',
+                primaryPlayerTemplate: '主播放器模板',
+                secondaryPlayerName: '备用播放器名称',
+                secondaryPlayerTemplate: '备用播放器模板',
+                openFailed: '未配置本地应用模板，已复制链接',
+                saved: '设置已保存',
+                resetDone: '设置已重置',
+                copiedAsFallback: '已复制链接作为兜底',
+                nativeDownload: '未配置下载器，改用浏览器下载',
+                invalidTemplate: '模板必须包含 {{rawUrl}} 或 {{url}}',
+                bridgeLaunchFailed: '本地桥接执行失败',
+                bridgeTokenMissing: 'cmd: 模板必须配置桥接令牌',
+                sentToBridge: '已发送到本地桥接',
+                unknown: '未知',
+                configExample: '例如：iina://open?url={{url}}'
             }
-        }, 200);
+        };
 
-        return true;
-    }
+        let l = navigator.language || 'en';
+        if (l.startsWith('en-')) l = 'en';
+        else if (l.startsWith('zh-')) l = 'zh-CN';
+        else l = 'en';
+        const T = T_langs[l] || T_langs['zh-CN'];
 
-    
-    const reg = /magnet:\?xt=urn:btih:\w{10,}([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/;
+        if (location.host.endsWith('mail.qq.com')) {
+            return;
+        }
 
-    whenDOMReady(() => {
-        // 样式部分：重构为按钮组 (Button Group) 风格
+        const detectedUrls = new Set();
+        let itemCount = 0;
+        let appSettings = normalizeSettings(DEFAULT_SETTINGS);
+        let settingsOverlay;
+        let settingsForm;
+        let videoScanTimer = null;
+        let fullScanTimer = null;
+
+        const mgmapi = {
+            addStyle(cssText, targetDocument = document) {
+                const ownerDocument = targetDocument.ownerDocument || targetDocument;
+                const style = ownerDocument.createElement('style');
+                style.textContent = cssText;
+                (targetDocument.head || targetDocument.documentElement || targetDocument).appendChild(style);
+            },
+            async getValue(name, defaultVal) {
+                return await ((typeof GM_getValue === 'function') ? GM_getValue : GM.getValue)(name, defaultVal);
+            },
+            async setValue(name, value) {
+                return await ((typeof GM_setValue === 'function') ? GM_setValue : GM.setValue)(name, value);
+            },
+            xmlHttpRequest(details) {
+                return ((typeof GM_xmlhttpRequest === 'function') ? GM_xmlhttpRequest : GM.xmlHttpRequest)(details);
+            },
+            download(details) {
+                const url = details.url;
+                const filename = details.name || 'download.mp4';
+                const reportProgress = details.reportProgress || function () { };
+                const onComplete = details.onComplete || function () { };
+                const onError = details.onError || function () { };
+                const onStop = details.onStop || function () { };
+
+                let isCancelled = false;
+                let currentAbortController = null;
+                let currentGmRequest = null;
+
+                const cancel = () => {
+                    if (isCancelled) return;
+                    isCancelled = true;
+
+                    if (currentAbortController) {
+                        currentAbortController.abort();
+                    }
+
+                    if (currentGmRequest && typeof currentGmRequest.abort === 'function') {
+                        currentGmRequest.abort();
+                    }
+
+                    onStop();
+                };
+
+                (async () => {
+                    if (isCancelled) return;
+
+                    const currentOrigin = window.location.origin;
+                    let targetOrigin;
+                    try {
+                        targetOrigin = new URL(url).origin;
+                    } catch {
+                        onError(new Error(`Invalid URL: ${url}`));
+                        return;
+                    }
+
+                    if (currentOrigin === targetOrigin) {
+                        reportProgress(100);
+                        triggerAnchorDownload(url, filename);
+                        onComplete();
+                        return;
+                    }
+
+                    const supportsFileSystem = typeof unsafeWindow.showSaveFilePicker === 'function';
+                    let isCorsSupported = false;
+
+                    if (supportsFileSystem && !isCancelled) {
+                        try {
+                            currentAbortController = new AbortController();
+                            await fetch(url, {
+                                method: 'GET',
+                                signal: currentAbortController.signal,
+                                headers: details.headers || {}
+                            });
+                            isCorsSupported = true;
+                            currentAbortController.abort();
+                            currentAbortController = null;
+                        } catch (error) {
+                            if (error.name === 'AbortError') {
+                                isCorsSupported = true;
+                            }
+                        }
+                    }
+
+                    if (isCancelled) return;
+
+                    if (supportsFileSystem && isCorsSupported) {
+                        try {
+                            await streamDownload(url, filename, details.headers);
+                            return;
+                        } catch (error) {
+                            if (isCancelled || error.name === 'AbortError') {
+                                onStop();
+                                return;
+                            }
+                        }
+                    }
+
+                    gmDownload(details);
+                })();
+
+                function triggerAnchorDownload(blobUrl, name) {
+                    const element = document.createElement('a');
+                    element.href = blobUrl;
+                    element.download = name;
+                    element.style.display = 'none';
+                    document.body.appendChild(element);
+                    element.click();
+                    document.body.removeChild(element);
+                    if (blobUrl.startsWith('blob:')) {
+                        setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
+                    }
+                }
+
+                async function streamDownload(downloadUrl, name, headers) {
+                    let handle;
+                    try {
+                        handle = await unsafeWindow.showSaveFilePicker({
+                            suggestedName: name,
+                            types: [{
+                                description: 'Video File',
+                                accept: { 'video/mp4': ['.mp4'], 'application/octet-stream': ['.bin', '.ts', '.m3u8'] }
+                            }]
+                        });
+                    } catch (error) {
+                        if (error.name === 'AbortError') throw error;
+                        throw new Error('Unable to open save dialog');
+                    }
+
+                    if (isCancelled) throw new Error('AbortError');
+
+                    const writable = await handle.createWritable();
+                    currentAbortController = new AbortController();
+                    let response;
+
+                    try {
+                        response = await fetch(downloadUrl, {
+                            headers: headers || {},
+                            signal: currentAbortController.signal
+                        });
+                    } catch (error) {
+                        await writable.close();
+                        throw error;
+                    }
+
+                    if (!response.body) {
+                        await writable.close();
+                        throw new Error('ReadableStream not supported');
+                    }
+
+                    const reader = response.body.getReader();
+                    const contentLength = +response.headers.get('Content-Length');
+                    let receivedLength = 0;
+
+                    try {
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) break;
+
+                            await writable.write(value);
+                            receivedLength += value.length;
+                            if (contentLength) {
+                                reportProgress(Number.parseFloat(((receivedLength / contentLength) * 100).toFixed(2)));
+                            }
+                        }
+
+                        await writable.close();
+                        onComplete();
+                    } catch (error) {
+                        try { await writable.close(); } catch { }
+                        if (error.name === 'AbortError' || isCancelled) {
+                            throw new Error('AbortError');
+                        }
+                        throw error;
+                    } finally {
+                        currentAbortController = null;
+                    }
+                }
+
+                function gmDownload(opt) {
+                    currentGmRequest = mgmapi.xmlHttpRequest({
+                        method: 'GET',
+                        url: opt.url,
+                        responseType: 'blob',
+                        headers: opt.headers || {},
+                        onload(response) {
+                            if (isCancelled) return;
+                            if (response.status >= 200 && response.status < 300) {
+                                const blobUrl = URL.createObjectURL(response.response);
+                                triggerAnchorDownload(blobUrl, opt.name);
+                                reportProgress(100);
+                                onComplete();
+                            } else {
+                                onError(new Error(`Request failed: ${response.status}`));
+                            }
+                        },
+                        onprogress(event) {
+                            if (isCancelled) return;
+                            if (event.lengthComputable && event.total > 0) {
+                                reportProgress(Number.parseFloat(((event.loaded / event.total) * 100).toFixed(2)));
+                            }
+                        },
+                        onerror(error) {
+                            if (isCancelled) return;
+                            onError(error);
+                        },
+                        onabort() {
+                            onStop();
+                        }
+                    });
+                }
+
+                return { cancel };
+            },
+            copyText(text) {
+                return copyTextToClipboard(text);
+
+                async function copyTextToClipboard(copyText) {
+                    try {
+                        await navigator.clipboard.writeText(copyText);
+                    } catch {
+                        const textarea = document.createElement('textarea');
+                        textarea.textContent = copyText;
+                        document.body.appendChild(textarea);
+                        textarea.select();
+                        document.execCommand('copy');
+                        textarea.blur();
+                        document.body.removeChild(textarea);
+                    }
+                }
+            },
+            message(text, disappearTime = 5000) {
+                const id = 'f8243rd238-gm-message-panel';
+                let panel = document.querySelector(`#${id}`);
+                if (!panel) {
+                    panel = document.createElement('div');
+                    panel.id = id;
+                    panel.style.cssText = `
+                        position: fixed;
+                        bottom: 20px;
+                        right: 20px;
+                        display: flex;
+                        flex-direction: column;
+                        align-items: end;
+                        z-index: 999999999999999;
+                    `;
+                    (document.body || document.documentElement).appendChild(panel);
+                }
+
+                const messageDiv = document.createElement('div');
+                messageDiv.innerText = text;
+                messageDiv.style.cssText = `
+                    padding: 6px 10px;
+                    border-radius: 6px;
+                    background: black;
+                    box-shadow: #000 1px 2px 5px;
+                    margin-top: 10px;
+                    font-size: small;
+                    color: #fff;
+                    text-align: right;
+                `;
+                panel.appendChild(messageDiv);
+
+                setTimeout(() => {
+                    if (messageDiv.parentNode) {
+                        messageDiv.parentNode.removeChild(messageDiv);
+                    }
+                }, disappearTime);
+            }
+        };
+
+        const rootDiv = document.createElement('div');
+        rootDiv.style.cssText = `
+            position: fixed;
+            z-index: 9999999999999999;
+            opacity: 0.98;
+            display: none;
+        `;
+        document.documentElement.appendChild(rootDiv);
+
+        const shadowDOM = rootDiv.attachShadow({ mode: 'open' });
+        const wrapper = document.createElement('div');
+        shadowDOM.appendChild(wrapper);
+
         mgmapi.addStyle(`
-            /* 按钮组容器 */
-            .wtmzjk-btn-group {
-                display: inline-flex;
-                align-items: center;
-                margin: 2px 8px;
-                border-radius: 6px; /* 整体圆角 */
-                overflow: hidden;   /* 确保子元素不溢出圆角 */
-                box-shadow: 0 2px 5px rgba(0,0,0,0.15);
-                vertical-align: middle;
-                font-size: 12px;
-                line-height: 1;
+            .wtmzjk-wrapper {
+                --wt-accent: #4ea1ff;
+                --wt-accent-strong: #2d6bff;
+                --wt-surface: rgba(10, 16, 26, 0.84);
+                --wt-surface-strong: rgba(8, 12, 20, 0.96);
+                --wt-border: rgba(152, 181, 221, 0.18);
+                --wt-text: #f5f8ff;
+                --wt-muted: #9eadc2;
+                --wt-success: #31c48d;
+                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                color: var(--wt-text);
+                min-width: min(520px, calc(100vw - 28px));
+                transition: transform 160ms ease, opacity 160ms ease;
             }
 
-            /* 按钮通用样式 */
-            .wtmzjk-btn {
-                all: initial;
+            .wtmzjk-bar {
+                display: flex;
+                justify-content: flex-end;
+                gap: 6px;
+                margin-bottom: 6px;
+                align-items: center;
+            }
+
+            .wtmzjk-pill,
+            .wtmzjk-icon-btn {
                 display: inline-flex;
                 align-items: center;
                 justify-content: center;
-                padding: 6px 10px;
+                border: 1px solid var(--wt-border);
+                background:
+                    radial-gradient(circle at top, rgba(78, 161, 255, 0.18), transparent 55%),
+                    linear-gradient(180deg, rgba(28, 42, 66, 0.92), rgba(11, 18, 28, 0.94));
+                color: var(--wt-text);
+                border-radius: 999px;
                 cursor: pointer;
-                background: #306eff;; /* 主色调，可调整 */
+                user-select: none;
+                box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+                transition: transform 140ms ease, filter 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+                backdrop-filter: blur(14px);
+            }
+
+            .wtmzjk-pill {
+                width: 52px;
+                height: 52px;
+                position: relative;
+            }
+
+            .wtmzjk-pill::after {
+                content: attr(data-number);
+                position: absolute;
+                bottom: -3px;
+                right: -6px;
                 color: white;
-                border: none;
-                font-family: sans-serif;
-                font-size: inherit;
-                font-weight: 600;
-                transition: background 0.2s, filter 0.2s;
-                text-decoration: none;
-                height: 24px;
-                box-sizing: border-box;
+                font-size: 12px;
+                font-weight: 700;
+                background: linear-gradient(135deg, var(--wt-accent), #7ec8ff);
+                border-radius: 999px;
+                padding: 3px 7px;
+                box-shadow: 0 6px 16px rgba(78, 161, 255, 0.42);
             }
 
-            .wtmzjk-btn:hover {
-                background: #497dfd; /* Hover 深色 */
-            }
-            
-            .wtmzjk-btn:active {
-                background: #1e5ced; /* Active 更深 */
+            .wtmzjk-icon-btn {
+                width: 40px;
+                height: 40px;
             }
 
-            /* 图标样式 */
-            .wtmzjk-btn svg, .wtmzjk-btn img {
-                height: 14px;
-                width: 14px;
-                fill: white;
+            .wtmzjk-icon-btn:hover,
+            .wtmzjk-pill:hover {
+                filter: brightness(1.08);
+                border-color: rgba(126, 200, 255, 0.5);
+                transform: translateY(-1px) scale(1.01);
+            }
+
+            .wtmzjk-icon-btn:active,
+            .wtmzjk-pill:active {
+                transform: translateY(0) scale(0.98);
+            }
+
+            [data-shown="false"] .m3u8-item {
+                opacity: 0;
+                transform: translateY(-8px) scale(0.98);
                 pointer-events: none;
-                margin-right: 4px; /* 图标与文字间距 */
+                max-height: 0;
+                margin: 0;
+                padding-top: 0;
+                padding-bottom: 0;
+                overflow: hidden;
             }
-            
-            /* 仅图标模式修正 */
-            .wtmzjk-btn.icon-only svg {
-                margin-right: 0;
+
+            [data-shown="false"] {
+                opacity: 0.8;
             }
 
-            /* 分割线：通过右边框实现 */
-            .wtmzjk-btn:not(:last-child) {
-                border-right: 1px solid rgba(255, 255, 255, 0.3);
+            .m3u8-item {
+                color: var(--wt-text);
+                margin-bottom: 8px;
+                display: flex;
+                flex-direction: row;
+                align-items: center;
+                gap: 10px;
+                background:
+                    linear-gradient(180deg, rgba(17, 27, 42, 0.94), rgba(10, 17, 27, 0.96)),
+                    var(--wt-surface);
+                padding: 10px 12px;
+                border-radius: 14px;
+                font-size: 13px;
+                user-select: none;
+                min-width: min(520px, calc(100vw - 28px));
+                border: 1px solid var(--wt-border);
+                box-shadow: rgba(0, 0, 0, 0.28) 0 10px 30px;
+                backdrop-filter: blur(12px);
+                transition: transform 160ms ease, border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease, max-height 160ms ease, margin 160ms ease, padding 160ms ease;
+                animation: wtmzjk-item-in 180ms ease-out;
             }
-        `);
 
-        // 事件监听保持不变，稍作逻辑调整以适应新结构
-        window.addEventListener("click", onEvents, true);
-        window.addEventListener("mousedown", onEvents, true); // 如果不需要拖拽等操作，通常 click 就够了
-        window.addEventListener("mouseup", onEvents, true);
+            .m3u8-item:hover {
+                transform: translateY(-1px);
+                border-color: rgba(126, 200, 255, 0.36);
+                box-shadow: rgba(0, 0, 0, 0.36) 0 14px 34px;
+            }
 
-        watchBodyChange(work);
-    });
+            .m3u8-item-type {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-width: 48px;
+                padding: 6px 10px;
+                border-radius: 999px;
+                background: rgba(78, 161, 255, 0.14);
+                color: #cfe8ff;
+                font-size: 11px;
+                font-weight: 700;
+                letter-spacing: 0.04em;
+                text-transform: uppercase;
+            }
 
-    function onEvents(e) {
-        // 向上查找，防止点击到图标或span时失效
-        const target = e.target.closest('[data-wtmzjk-action]');
+            .m3u8-item-path {
+                color: #d7e3f6;
+                font-size: 12px;
+                max-width: 220px;
+                text-overflow: ellipsis;
+                white-space: nowrap;
+                overflow: hidden;
+                font-weight: 500;
+            }
 
-        if (target) {
-            e.preventDefault();
-            e.stopPropagation();
+            .m3u8-item-duration {
+                color: var(--wt-muted);
+                flex-grow: 1;
+                min-width: 90px;
+                font-size: 12px;
+            }
 
-            // 仅在 click 时触发，避免 mouseup/down 重复触发
-            if (e.type !== "click") return;
+            .m3u8-item-action {
+                cursor: pointer;
+                color: var(--wt-text);
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                min-height: 32px;
+                padding: 0 11px;
+                border-radius: 999px;
+                background: rgba(255, 255, 255, 0.06);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                font-size: 12px;
+                font-weight: 600;
+                white-space: nowrap;
+                transition: transform 120ms ease, filter 120ms ease, background 120ms ease, border-color 120ms ease;
+            }
 
-            const action = target.getAttribute('data-wtmzjk-action');
-            const url = target.getAttribute('data-wtmzjk-url');
+            .m3u8-item-action:hover {
+                filter: brightness(1.06);
+                transform: translateY(-1px);
+                border-color: rgba(126, 200, 255, 0.28);
+            }
 
-            if (action === 'play') {
-                // 优先尝试用本地播放器打开（IINA > VLC）
-                openWithLocalApp(url, 'iina') || openWithLocalApp(url, 'vlc');
-            } else if (action === 'copy') {
-                // 实现复制功能
-                mgmapi.copyText(url).then(() => {
-                    // 简单的视觉反馈
-                    const originalText = target.querySelector('span').innerText;
-                    target.querySelector('span').innerText = T.copied;
-                    setTimeout(() => {
-                        target.querySelector('span').innerText = originalText;
-                    }, 2000);
-                }).catch(err => {
-                    console.error('Copy failed', err);
+            .m3u8-item-action:active {
+                transform: translateY(0) scale(0.98);
+            }
+
+            .copy-link {
+                color: #dfe8f5;
+            }
+
+            .download-btn {
+                background: linear-gradient(135deg, rgba(45, 107, 255, 0.96), rgba(78, 161, 255, 0.94));
+                border-color: transparent;
+                box-shadow: 0 8px 18px rgba(45, 107, 255, 0.26);
+            }
+
+            .play-btn {
+                background: rgba(49, 196, 141, 0.12);
+                color: #d7fff0;
+                border-color: rgba(49, 196, 141, 0.24);
+            }
+
+            .progress {
+                color: #b8d8ff;
+                background: rgba(78, 161, 255, 0.08);
+                border-color: rgba(78, 161, 255, 0.2);
+            }
+
+            .stop-btn {
+                background: rgba(255, 120, 120, 0.1);
+                color: #ffd5d5;
+                border-color: rgba(255, 120, 120, 0.2);
+            }
+
+            .wtmzjk-settings-overlay {
+                position: fixed;
+                inset: 0;
+                background: rgba(2, 6, 12, 0.24);
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                z-index: 2;
+                opacity: 0;
+                visibility: hidden;
+                pointer-events: none;
+                transition: opacity 160ms ease, background 160ms ease, visibility 160ms ease;
+                backdrop-filter: blur(8px);
+            }
+
+            .wtmzjk-settings-overlay[data-open="true"] {
+                opacity: 1;
+                visibility: visible;
+                pointer-events: auto;
+                background: rgba(2, 6, 12, 0.58);
+            }
+
+            .wtmzjk-settings-card {
+                width: min(640px, calc(100vw - 40px));
+                max-height: min(78vh, 860px);
+                overflow: auto;
+                background:
+                    radial-gradient(circle at top right, rgba(78, 161, 255, 0.12), transparent 30%),
+                    linear-gradient(180deg, rgba(17, 22, 29, 0.98), rgba(10, 14, 20, 0.99));
+                color: white;
+                border-radius: 18px;
+                padding: 20px;
+                box-shadow: rgba(0, 0, 0, 0.46) 0 24px 60px;
+                border: 1px solid rgba(148, 183, 223, 0.16);
+                transform: translateY(14px) scale(0.98);
+                transition: transform 180ms ease;
+            }
+
+            .wtmzjk-settings-overlay[data-open="true"] .wtmzjk-settings-card {
+                transform: translateY(0) scale(1);
+            }
+
+            .wtmzjk-settings-card h3 {
+                margin: 0 0 8px;
+                font-size: 19px;
+                letter-spacing: 0.01em;
+            }
+
+            .wtmzjk-settings-card p {
+                margin: 0 0 16px;
+                color: #bcc4ce;
+                font-size: 12px;
+                line-height: 1.5;
+            }
+
+            .wtmzjk-field {
+                display: flex;
+                flex-direction: column;
+                gap: 6px;
+                margin-bottom: 12px;
+            }
+
+            .wtmzjk-field label {
+                font-size: 12px;
+                color: #dce5ef;
+            }
+
+            .wtmzjk-field input,
+            .wtmzjk-field select {
+                border: 1px solid #2c3642;
+                background: #0b0f14;
+                color: white;
+                border-radius: 8px;
+                padding: 10px 12px;
+                font-size: 13px;
+                transition: border-color 120ms ease, box-shadow 120ms ease, background 120ms ease;
+                outline: none;
+            }
+
+            .wtmzjk-field input:focus,
+            .wtmzjk-field select:focus {
+                border-color: rgba(78, 161, 255, 0.56);
+                box-shadow: 0 0 0 3px rgba(78, 161, 255, 0.14);
+                background: #0d131b;
+            }
+
+            .wtmzjk-field-hint {
+                color: #9aa7b6;
+                font-size: 11px;
+                line-height: 1.4;
+            }
+
+            .wtmzjk-settings-actions {
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                margin-top: 16px;
+            }
+
+            .wtmzjk-settings-actions button {
+                border: none;
+                border-radius: 10px;
+                padding: 10px 14px;
+                cursor: pointer;
+                font-size: 13px;
+                font-weight: 600;
+                transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease;
+            }
+
+            .wtmzjk-settings-actions button:hover {
+                filter: brightness(1.05);
+                transform: translateY(-1px);
+            }
+
+            .wtmzjk-settings-actions button:active {
+                transform: translateY(0) scale(0.98);
+            }
+
+            .wtmzjk-btn-secondary {
+                background: #243140;
+                color: white;
+            }
+
+            .wtmzjk-btn-primary {
+                background: #2d6bff;
+                color: white;
+                box-shadow: 0 10px 22px rgba(45, 107, 255, 0.24);
+            }
+
+            @keyframes wtmzjk-item-in {
+                from {
+                    opacity: 0;
+                    transform: translateY(-8px) scale(0.985);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0) scale(1);
+                }
+            }
+
+            @media (max-width: 720px) {
+                .wtmzjk-wrapper {
+                    min-width: calc(100vw - 18px);
+                }
+
+                .m3u8-item {
+                    min-width: calc(100vw - 18px);
+                    flex-wrap: wrap;
+                    gap: 8px;
+                    padding: 10px;
+                }
+
+                .m3u8-item-path,
+                .m3u8-item-duration {
+                    max-width: 100%;
+                    min-width: 0;
+                    flex-basis: 100%;
+                }
+
+                .wtmzjk-bar {
+                    gap: 8px;
+                }
+
+                .wtmzjk-settings-card {
+                    width: calc(100vw - 18px);
+                    max-height: calc(100vh - 20px);
+                    padding: 16px;
+                }
+            }
+        `, shadowDOM);
+
+        wrapper.className = 'wtmzjk-wrapper';
+        wrapper.setAttribute('data-shown', 'true');
+        wrapper.innerHTML = `
+            <div class="wtmzjk-bar">
+                <span class="wtmzjk-icon-btn" data-action="settings" title="${T.settings}">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                        <path fill="currentColor" d="M19.14 12.94a7.43 7.43 0 0 0 .05-.94 7.43 7.43 0 0 0-.05-.94l2.03-1.58a.5.5 0 0 0 .12-.65l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.1 7.1 0 0 0-1.63-.94l-.36-2.54a.48.48 0 0 0-.49-.41h-3.84a.48.48 0 0 0-.49.41l-.36 2.54c-.58.23-1.12.54-1.63.94l-2.39-.96a.5.5 0 0 0-.61.22L2.68 8.83a.5.5 0 0 0 .12.65l2.03 1.58a7.43 7.43 0 0 0-.05.94c0 .32.02.63.05.94L2.8 14.52a.5.5 0 0 0-.12.65l1.92 3.32c.14.24.43.34.69.22l2.39-.96c.5.4 1.05.72 1.63.94l.36 2.54c.05.24.25.41.49.41h3.84c.24 0 .44-.17.49-.41l.36-2.54c.58-.23 1.12-.54 1.63-.94l2.39.96c.26.12.55.02.69-.22l1.92-3.32a.5.5 0 0 0-.12-.65l-2.03-1.58ZM12 15.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5Z"/>
+                    </svg>
+                </span>
+                <span class="wtmzjk-pill" data-action="toggle" data-number="0" title="Toggle">
+                    <svg style="filter: invert(1);" width="24" height="24" viewBox="0 0 585.913 585.913">
+                        <path d="M11.173 46.2v492.311l346.22 47.402V535.33c.776.058 1.542.109 2.329.109h177.39c20.75 0 37.627-16.883 37.627-37.627V86.597c0-20.743-16.877-37.628-37.627-37.628h-177.39c-.781 0-1.553.077-2.329.124V0L11.173 46.2Zm379.7 318.319V245.241c0-1.07.615-2.071 1.586-2.521.981-.483 2.13-.365 2.981.307l93.393 59.623a2.8 2.8 0 0 1 1.065 2.215 2.8 2.8 0 0 1-1.065 2.215l-93.397 59.628c-.509.4-1.114.61-1.743.61l-1.233-.289a2.85 2.85 0 0 1-1.587-2.51Z"/>
+                    </svg>
+                </span>
+            </div>
+        `;
+
+        const barBtn = wrapper.querySelector('[data-action="toggle"]');
+        const settingsBtn = wrapper.querySelector('[data-action="settings"]');
+
+        createSettingsOverlay();
+
+        initializePanel();
+        installDetectors();
+        scheduleVideoScan();
+        setInterval(scheduleVideoScan, 1500);
+
+        settingsBtn.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openSettings();
+        });
+
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape' && settingsOverlay && settingsOverlay.getAttribute('data-open') === 'true') {
+                closeSettings();
+            }
+        });
+
+        (async function bindPanelMove() {
+            let shown = await mgmapi.getValue(PANEL_SHOWN_KEY, true);
+            wrapper.setAttribute('data-shown', String(shown));
+
+            let x = await mgmapi.getValue(PANEL_X_KEY, 10);
+            let y = await mgmapi.getValue(PANEL_Y_KEY, 10);
+
+            x = Math.min(innerWidth - 50, x);
+            y = Math.min(innerHeight - 50, y);
+            if (x < 0) x = 0;
+            if (y < 0) y = 0;
+
+            rootDiv.style.top = `${y}px`;
+            rootDiv.style.right = `${x}px`;
+
+            barBtn.addEventListener('mousedown', (event) => {
+                const startX = event.pageX;
+                const startY = event.pageY;
+                let moved = false;
+
+                const mousemove = (moveEvent) => {
+                    const offsetX = moveEvent.pageX - startX;
+                    const offsetY = moveEvent.pageY - startY;
+                    if (moved || (Math.abs(offsetX) + Math.abs(offsetY)) > 5) {
+                        moved = true;
+                        rootDiv.style.top = `${y + offsetY}px`;
+                        rootDiv.style.right = `${x - offsetX}px`;
+                    }
+                };
+
+                const mouseup = (upEvent) => {
+                    const offsetX = upEvent.pageX - startX;
+                    const offsetY = upEvent.pageY - startY;
+
+                    if (moved) {
+                        x -= offsetX;
+                        y += offsetY;
+                        mgmapi.setValue(PANEL_X_KEY, x);
+                        mgmapi.setValue(PANEL_Y_KEY, y);
+                    } else {
+                        shown = !shown;
+                        mgmapi.setValue(PANEL_SHOWN_KEY, shown);
+                        wrapper.setAttribute('data-shown', String(shown));
+                    }
+
+                    removeEventListener('mousemove', mousemove);
+                    removeEventListener('mouseup', mouseup);
+                };
+
+                addEventListener('mousemove', mousemove);
+                addEventListener('mouseup', mouseup);
+            });
+        })();
+
+        async function initializePanel() {
+            appSettings = normalizeSettings(await mgmapi.getValue(SETTINGS_KEY, DEFAULT_SETTINGS));
+            syncSettingsForm(appSettings);
+            if (isFullScanMode()) {
+                scheduleFullScan();
+            }
+        }
+
+        function createSettingsOverlay() {
+            settingsOverlay = document.createElement('div');
+            settingsOverlay.className = 'wtmzjk-settings-overlay';
+            settingsOverlay.setAttribute('data-open', 'false');
+            settingsOverlay.innerHTML = `
+                <div class="wtmzjk-settings-card">
+                    <h3>${T.settingsTitle}</h3>
+                    <p>${T.settingsHint}<br>${T.configExample}</p>
+                    <form>
+                        <div class="wtmzjk-field">
+                            <label>${T.scanMode}</label>
+                            <select name="scanMode">
+                                <option value="light">${T.scanModeLight}</option>
+                                <option value="full">${T.scanModeFull}</option>
+                            </select>
+                            <span class="wtmzjk-field-hint">${T.scanModeHint}</span>
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.bridgeUrl}</label>
+                            <input name="commandBridgeUrl" type="text" placeholder="http://127.0.0.1:3210" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.bridgeToken}</label>
+                            <input name="commandBridgeToken" type="password" placeholder="bridge token" />
+                            <span class="wtmzjk-field-hint">${T.bridgeHint}</span>
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.downloaderPreset}</label>
+                            <select name="downloaderPreset">${buildPresetOptions('downloader')}</select>
+                            <span class="wtmzjk-field-hint">${T.presetHint}</span>
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.downloaderName}</label>
+                            <input name="downloaderName" type="text" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.downloaderTemplate}</label>
+                            <input name="downloaderTemplate" type="text" placeholder="fdm://{{rawUrl}}" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.playerPreset}</label>
+                            <select name="primaryPlayerPreset">${buildPresetOptions('player')}</select>
+                            <span class="wtmzjk-field-hint">${T.presetHint}</span>
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.primaryPlayerName}</label>
+                            <input name="primaryPlayerName" type="text" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.primaryPlayerTemplate}</label>
+                            <input name="primaryPlayerTemplate" type="text" placeholder="iina://open?url={{url}}" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.playerPreset}</label>
+                            <select name="secondaryPlayerPreset">${buildPresetOptions('player')}</select>
+                            <span class="wtmzjk-field-hint">${T.presetHint}</span>
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.secondaryPlayerName}</label>
+                            <input name="secondaryPlayerName" type="text" />
+                        </div>
+                        <div class="wtmzjk-field">
+                            <label>${T.secondaryPlayerTemplate}</label>
+                            <input name="secondaryPlayerTemplate" type="text" placeholder="vlc://{{rawUrl}}" />
+                        </div>
+                        <div class="wtmzjk-settings-actions">
+                            <button type="button" class="wtmzjk-btn-secondary" data-settings-action="reset">${T.reset}</button>
+                            <button type="button" class="wtmzjk-btn-secondary" data-settings-action="cancel">${T.cancel}</button>
+                            <button type="submit" class="wtmzjk-btn-primary">${T.save}</button>
+                        </div>
+                    </form>
+                </div>
+            `;
+            wrapper.appendChild(settingsOverlay);
+            settingsForm = settingsOverlay.querySelector('form');
+            bindPresetSelect(settingsForm.elements.namedItem('downloaderPreset'), 'downloaderTemplate', 'downloader');
+            bindPresetSelect(settingsForm.elements.namedItem('primaryPlayerPreset'), 'primaryPlayerTemplate', 'player');
+            bindPresetSelect(settingsForm.elements.namedItem('secondaryPlayerPreset'), 'secondaryPlayerTemplate', 'player');
+
+            settingsOverlay.addEventListener('click', (event) => {
+                if (event.target === settingsOverlay) {
+                    closeSettings();
+                }
+            });
+
+            settingsOverlay.querySelector('[data-settings-action="cancel"]').addEventListener('click', closeSettings);
+            settingsOverlay.querySelector('[data-settings-action="reset"]').addEventListener('click', async () => {
+                appSettings = normalizeSettings(DEFAULT_SETTINGS);
+                syncSettingsForm(appSettings);
+                await mgmapi.setValue(SETTINGS_KEY, appSettings);
+                scheduleVideoScan();
+                mgmapi.message(T.resetDone, 2000);
+            });
+
+            settingsForm.addEventListener('submit', async (event) => {
+                event.preventDefault();
+                appSettings = normalizeSettings(Object.fromEntries(new FormData(settingsForm).entries()));
+                syncSettingsForm(appSettings);
+                await mgmapi.setValue(SETTINGS_KEY, appSettings);
+                scheduleVideoScan();
+                if (isFullScanMode()) scheduleFullScan();
+                mgmapi.message(T.saved, 2000);
+                closeSettings();
+            });
+        }
+
+        function syncSettingsForm(settings) {
+            if (!settingsForm) return;
+            for (const [key, value] of Object.entries(settings)) {
+                const input = settingsForm.elements.namedItem(key);
+                if (input) input.value = value;
+            }
+        }
+
+        function buildPresetOptions(groupName) {
+            return Object.entries(LAUNCHER_PRESETS[groupName]).map(([key, preset]) => (
+                `<option value="${key}">${preset.name}</option>`
+            )).join('');
+        }
+
+        function bindPresetSelect(selectElement, templateFieldName, groupName) {
+            if (!selectElement) return;
+            const templateInput = settingsForm.elements.namedItem(templateFieldName);
+            selectElement.addEventListener('change', () => {
+                const preset = LAUNCHER_PRESETS[groupName][selectElement.value];
+                if (!templateInput || !preset) return;
+                if (selectElement.value !== 'custom') {
+                    templateInput.value = preset.template;
+                }
+            });
+            if (templateInput) {
+                templateInput.addEventListener('input', () => {
+                    const matchedPreset = findPresetKey(groupName, templateInput.value);
+                    selectElement.value = matchedPreset;
                 });
             }
         }
-    }
 
-    function createWatchButton(url, isForPlain = false) {
-        // 创建容器
-        let group = document.createElement("div");
-        group.className = "wtmzjk-btn-group";
-        if (isForPlain) group.setAttribute('data-wtmzjk-button-for-plain', '');
+        function openSettings() {
+            syncSettingsForm(appSettings);
+            settingsOverlay.setAttribute('data-open', 'true');
+        }
 
-        // 1. 复制按钮 (左侧)
-        let copyBtn = document.createElement("button");
-        copyBtn.className = "wtmzjk-btn";
-        copyBtn.setAttribute('data-wtmzjk-action', 'copy');
-        copyBtn.setAttribute('data-wtmzjk-url', url);
-        copyBtn.title = T.copy;
-        // 这里的图标可以换成你想要的 Copy 图标
-        copyBtn.innerHTML = `
-            <svg viewBox="0 0 448 512"><path d="M384 336H192c-8.8 0-16-7.2-16-16V64c0-8.8 7.2-16 16-16l140.1 0L400 115.9V320c0 8.8-7.2 16-16 16zM192 384H384c35.3 0 64-28.7 64-64V115.9c0-12.7-5.1-24.9-14.1-33.9L366.1 14.1c-9-9-21.2-14.1-33.9-14.1H192c-35.3 0-64 28.7-64 64V320c0 35.3 28.7 64 64 64zM64 128c-35.3 0-64 28.7-64 64V448c0 35.3 28.7 64 64 64H256c35.3 0 64-28.7 64-64V416H272v32c0 8.8-7.2 16-16 16H64c-8.8 0-16-7.2-16-16V192c0-8.8 7.2-16 16-16H96V128H64z"/></svg>
-            <span>${T.copy}</span>
-        `;
+        function closeSettings() {
+            settingsOverlay.setAttribute('data-open', 'false');
+        }
 
-        // 2. 播放按钮 (右侧)
-        let playBtn = document.createElement("button");
-        playBtn.className = "wtmzjk-btn";
-        playBtn.setAttribute('data-wtmzjk-action', 'play');
-        playBtn.setAttribute('data-wtmzjk-url', url);
-        playBtn.title = T.play;
-        // 注意：这里是你要求的自定义图标位置，src 留空给你填
-        playBtn.innerHTML = `
-            <svg style="width: auto;height: 20px;" width="60" height="60" viewBox="0 0 60 60" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path fill="#FFFFFF" clip-rule="evenodd" fill-rule="evenodd" d="M26.5835 15.2408C27.0625 15.1802 27.4695 14.8617 27.6434 14.4113L29.0836 10.6824C29.2028 10.3737 28.9496 10.0495 28.6213 10.0904L13.4653 11.9768C12.6864 12.0738 12.0192 12.5804 11.7165 13.3045L10.032 17.3354L16.8876 16.4679L26.5835 15.2408ZM33.4485 15.2408C32.9695 15.1802 32.5625 14.8617 32.3885 14.4113L30.9484 10.6824C30.8292 10.3737 31.0824 10.0495 31.4107 10.0904L46.5667 11.9768C47.3455 12.0738 48.0128 12.5804 48.3154 13.3045L50 17.3354L33.4485 15.2408ZM10 17.336H50V39.3048C50 41.7755 47.9971 43.7784 45.5263 43.7784H14.4737C12.0029 43.7784 10 41.7755 10 39.3048V17.336ZM22.889 24.2091C23.8772 24.2091 24.6784 25.0102 24.6784 25.9985V29.5541C24.6784 30.5424 23.8772 31.3435 22.889 31.3435C21.9007 31.3435 21.0995 30.5424 21.0995 29.5541V25.9985C21.0995 25.0102 21.9007 24.2091 22.889 24.2091ZM38.9006 25.9985C38.9006 25.0102 38.0994 24.2091 37.1111 24.2091C36.1228 24.2091 35.3217 25.0102 35.3217 25.9985V29.5541C35.3217 30.5424 36.1228 31.3435 37.1111 31.3435C38.0994 31.3435 38.9006 30.5424 38.9006 29.5541V25.9985ZM35.4241 36.7358C35.6534 37.314 35.3706 37.9687 34.7924 38.198L34.615 37.7507C34.6956 37.954 34.7923 38.1981 34.792 38.1982L34.7906 38.1987L34.788 38.1998L34.7803 38.2028L34.7552 38.2125C34.7343 38.2205 34.705 38.2316 34.668 38.2454C34.5939 38.2728 34.4885 38.3108 34.3562 38.3558C34.0921 38.4457 33.7183 38.5645 33.2711 38.683C32.3873 38.9173 31.1692 39.1638 29.9243 39.1638C28.6786 39.1638 27.4701 38.9171 26.5947 38.6821C26.152 38.5633 25.7828 38.4443 25.522 38.354C25.3913 38.3089 25.2872 38.2707 25.2141 38.2431C25.1774 38.2293 25.1485 38.2181 25.1278 38.21L25.1029 38.2002L25.0952 38.1971L25.0925 38.1961L25.0911 38.1955C25.0908 38.1954 25.3266 37.6115 25.3889 37.4575L25.0907 38.1953C24.514 37.9623 24.2354 37.3058 24.4685 36.7291C24.7014 36.1528 25.3571 35.8742 25.9335 36.1063L25.9352 36.107L25.948 36.1121C25.9605 36.1169 25.9808 36.1248 26.0085 36.1353C26.064 36.1561 26.1486 36.1872 26.2582 36.2252C26.478 36.3011 26.7958 36.4037 27.1787 36.5065C27.9545 36.7148 28.9518 36.9112 29.9243 36.9112C30.8975 36.9112 31.9059 36.7145 32.6939 36.5056C33.0826 36.4026 33.4062 36.2997 33.6304 36.2234C33.7423 36.1853 33.8288 36.154 33.8856 36.133C33.9139 36.1225 33.9349 36.1145 33.9478 36.1096L33.961 36.1045L33.9618 36.1041L33.9622 36.104L33.9624 36.1039L33.9628 36.1038C34.5408 35.8752 35.1949 36.158 35.4241 36.7358Z" />
-            </svg>
-            <span>${T.play}</span>
-        `;
+        function isFullScanMode() {
+            return appSettings.scanMode === 'full';
+        }
 
-        //             <svg style="margin-left:4px; margin-right:0;" viewBox="0 0 384 512"><path d="M73 39c-14.8-9.1-33.4-9.4-48.5-.9S0 62.6 0 80V432c0 17.4 9.4 33.4 24.5 41.9s33.7 8.1 48.5-.9L361 297c14.3-8.7 23-24.2 23-41s-8.7-32.2-23-41L73 39z"/></svg>
+        function installDetectors() {
+            const originalFetch = unsafeWindow.fetch;
+            if (typeof originalFetch === 'function') {
+                unsafeWindow.fetch = async function (...args) {
+                    const response = await originalFetch.apply(this, args);
+                    inspectFetchResponse(args[0], response);
+                    return response;
+                };
+            }
 
+            const originalResponseText = unsafeWindow.Response && unsafeWindow.Response.prototype && unsafeWindow.Response.prototype.text;
+            if (typeof originalResponseText === 'function') {
+                unsafeWindow.Response.prototype.text = function () {
+                    return new Promise((resolve, reject) => {
+                        originalResponseText.call(this).then((text) => {
+                            resolve(text);
+                            inspectManifestCandidate(this.url, text);
+                        }).catch(reject);
+                    });
+                };
+            }
 
-        group.appendChild(copyBtn);
-        group.appendChild(playBtn);
+            const originalXhrOpen = unsafeWindow.XMLHttpRequest && unsafeWindow.XMLHttpRequest.prototype && unsafeWindow.XMLHttpRequest.prototype.open;
+            if (typeof originalXhrOpen === 'function') {
+                unsafeWindow.XMLHttpRequest.prototype.open = function (...args) {
+                    const requestUrl = resolveRequestUrl(args[1], location.href);
+                    if (looksLikeM3u8Url(requestUrl)) {
+                        queueM3uCandidate(requestUrl);
+                    }
 
-        return group;
-    }
+                    this.addEventListener('load', () => {
+                        try {
+                            const responseUrl = this.responseURL || requestUrl;
+                            inspectManifestCandidate(responseUrl, this.responseText);
+                        } catch {
+                            // Ignore unreadable XHR responses.
+                        }
+                    });
 
-    function hasPlainMagUrlThatNotHandled() {
-        let m = document.body.textContent.match(new RegExp(reg, 'g'));
-        return document.querySelectorAll(`[data-wtmzjk-button-for-plain]`).length != (m ? m.length : 0);
-    }
+                    return originalXhrOpen.apply(this, args);
+                };
+            }
 
-    function work() {
-        if (!document.body) return;
-        if (hasPlainMagUrlThatNotHandled()) {
-            for (let node of getAllTextNodes(document.body)) {
-                if (node.nextSibling && node.nextSibling.hasAttribute && node.nextSibling.className.includes('wtmzjk-btn-group')) continue;
-                let text = node.nodeValue;
-                if (!reg.test(text)) continue;
-                let match = text.match(reg);
-                if (match) {
-                    let url = match[0];
-                    let p = node.parentNode;
-                    p.insertBefore(document.createTextNode(text.slice(0, match.index + url.length)), node);
-                    p.insertBefore(createWatchButton(url, true), node);
-                    p.insertBefore(document.createTextNode(text.slice(match.index + url.length)), node);
-                    p.removeChild(node);
+            whenDOMReady(() => {
+                const observer = new MutationObserver(() => {
+                    scheduleVideoScan();
+                    if (isFullScanMode()) {
+                        scheduleFullScan();
+                    }
+                });
+                observer.observe(document.documentElement, {
+                    childList: true,
+                    subtree: true
+                });
+            });
+        }
+
+        function scheduleVideoScan() {
+            if (videoScanTimer) return;
+            videoScanTimer = setTimeout(() => {
+                videoScanTimer = null;
+                doVideos();
+            }, 250);
+        }
+
+        function scheduleFullScan() {
+            if (fullScanTimer) return;
+            fullScanTimer = setTimeout(() => {
+                fullScanTimer = null;
+                scanDocumentForMediaLinks();
+            }, 350);
+        }
+
+        function inspectFetchResponse(input, response) {
+            const requestUrl = resolveRequestUrl(input, location.href);
+            const responseUrl = resolveRequestUrl(response && response.url, location.href) || requestUrl;
+
+            if (looksLikeM3u8Url(responseUrl)) {
+                queueM3uCandidate(responseUrl);
+            }
+
+            const contentType = response && response.headers && typeof response.headers.get === 'function'
+                ? (response.headers.get('content-type') || '')
+                : '';
+
+            if (contentType.includes('mpegurl') && response && typeof response.clone === 'function') {
+                response.clone().text().then((text) => {
+                    inspectManifestCandidate(responseUrl, text);
+                }).catch(() => { });
+            } else if (isFullScanMode() && looksLikeM3u8Url(responseUrl) && response && typeof response.clone === 'function') {
+                response.clone().text().then((text) => {
+                    inspectManifestCandidate(responseUrl, text);
+                }).catch(() => { });
+            }
+        }
+
+        function inspectManifestCandidate(url, content) {
+            const summary = parseManifestSummary(content);
+            if (!summary.isManifest) return;
+            doM3U({ url, content, summary }).catch(() => { });
+        }
+
+        function queueM3uCandidate(url) {
+            if (!url || detectedUrls.has(url)) return;
+            doM3U({ url }).catch(() => { });
+        }
+
+        function doVideos() {
+            for (const video of Array.from(document.querySelectorAll('video'))) {
+                const sources = [video.currentSrc, video.src]
+                    .concat(Array.from(video.querySelectorAll('source[src]')).map((node) => node.src))
+                    .filter((value, index, list) => value && list.indexOf(value) === index);
+
+                for (const source of sources) {
+                    if (!source.startsWith('http') || detectedUrls.has(source)) continue;
+                    detectedUrls.add(source);
+                    showVideo({
+                        type: 'video',
+                        url: new URL(source),
+                        duration: Number.isFinite(video.duration) && video.duration > 0
+                            ? `${Math.ceil(video.duration * 10 / 60) / 10} ${T.mins}`
+                            : T.unknown,
+                        fallbackExtension: '.mp4',
+                        supportsPlay: isActionConfigured(appSettings.primaryPlayerTemplate) || isActionConfigured(appSettings.secondaryPlayerTemplate)
+                    });
                 }
             }
         }
-        for (let a of Array.from(document.querySelectorAll(
-            ['href', 'value', 'data-clipboard-text', 'data-value', 'title', 'alt', 'data-url', 'data-magnet', 'data-copy'].map(n => `[${n}*="magnet:?xt=urn:btih:"]`).join(',')
-        ))) {
-            if (a.nextSibling && a.nextSibling.hasAttribute && a.nextSibling.className.includes('wtmzjk-btn-group')) continue; // 已经添加
-            if (reg.test(a.textContent)) continue;
-            for (let attr of a.getAttributeNames()) {
-                let val = a.getAttribute(attr);
-                if (!reg.test(val)) continue;
-                let url = val.match(reg)[0];
-                a.parentNode.insertBefore(createWatchButton(url), a.nextSibling);
+
+        function scanDocumentForMediaLinks() {
+            const selectors = [
+                'a[href]',
+                'source[src]',
+                'video[src]',
+                'meta[content]',
+                '[data-url]',
+                '[data-src]',
+                '[data-play]',
+                '[data-play-url]',
+                '[data-m3u8]',
+                '[content]'
+            ];
+            const attributes = ['href', 'src', 'content', 'data-url', 'data-src', 'data-play', 'data-play-url', 'data-m3u8'];
+
+            for (const node of Array.from(document.querySelectorAll(selectors.join(',')))) {
+                for (const attribute of attributes) {
+                    const value = node.getAttribute && node.getAttribute(attribute);
+                    if (!looksLikeM3u8Url(value)) continue;
+                    const absoluteUrl = resolveRequestUrl(value, location.href);
+                    if (absoluteUrl) {
+                        queueM3uCandidate(absoluteUrl);
+                    }
+                }
             }
         }
-    }
 
+        async function doM3U({ url, content, summary }) {
+            const manifestUrl = new URL(url, location.href);
+            if (detectedUrls.has(manifestUrl.href)) return;
 
-    function watchBodyChange(onchange) {
-        let timeout;
-        let observer = new MutationObserver(() => {
-            if (!timeout) {
-                timeout = setTimeout(() => {
-                    timeout = null;
-                    onchange();
-                }, 200);
+            let manifestText = content;
+            if (!manifestText) {
+                try {
+                    manifestText = await (await fetch(manifestUrl.href)).text();
+                } catch {
+                    manifestText = '';
+                }
             }
-        });
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            characterData: true
-        });
 
-    }
+            const manifestSummary = summary || parseManifestSummary(manifestText);
+            if (!manifestSummary.isManifest) return;
 
-    function getAllTextNodes(parent) {
-        var re = [];
-        if (["STYLE", "SCRIPT", "BASE", "COMMAND", "LINK", "META", "TITLE", "XTRANS-TXT", "XTRANS-TXT-GROUP", "XTRANS-POPUP"].includes(parent.tagName)) return re;
-        for (let node of parent.childNodes) {
-            if (node.childNodes.length) re = re.concat(getAllTextNodes(node));
-            else if (Text.prototype.isPrototypeOf(node) && (!node.nodeValue.match(/^\s*$/))) re.push(node);
+            detectedUrls.add(manifestUrl.href);
+
+            let durationLabel = T.unknown;
+            if (manifestSummary.duration) {
+                durationLabel = `${Math.ceil(manifestSummary.duration * 10 / 60) / 10} ${T.mins}`;
+            } else if (manifestSummary.playlistCount) {
+                durationLabel = `${T.multiLine}(${manifestSummary.playlistCount})`;
+            }
+
+            showVideo({
+                type: 'm3u8',
+                url: manifestUrl,
+                duration: durationLabel,
+                fallbackExtension: '.m3u8',
+                supportsPlay: isActionConfigured(appSettings.primaryPlayerTemplate) || isActionConfigured(appSettings.secondaryPlayerTemplate)
+            });
         }
-        return re;
-    }
 
-    function whenDOMReady(f) {
-        if (document.body) f();
-        else window.addEventListener("DOMContentLoaded", function l() {
-            window.removeEventListener("DOMContentLoaded", l);
-            f();
-        });
-    }
+        function showVideo({ type, url, duration, fallbackExtension, supportsPlay }) {
+            const div = document.createElement('div');
+            div.className = 'm3u8-item';
+            div.innerHTML = `
+                <span class="m3u8-item-type"${type === 'm3u8' ? ' style="background:rgba(78,161,255,0.18);color:#d8ecff;"' : ' style="background:rgba(49,196,141,0.12);color:#d7fff0;border-color:rgba(49,196,141,0.2);"' }>${type}</span>
+                <span class="m3u8-item-path" title="${url.href}">${url.pathname || url.href}</span>
+                <span class="m3u8-item-duration">${duration}</span>
+                <span class="m3u8-item-action copy-link" title="${T.copy}">${T.copy}</span>
+                <span class="m3u8-item-action download-btn" title="${appSettings.downloaderName || T.download}">${appSettings.downloaderName || T.download}</span>
+                ${supportsPlay ? `<span class="m3u8-item-action play-btn" title="${appSettings.primaryPlayerName || T.play}">${appSettings.primaryPlayerName || T.play}</span>` : ''}
+                <span class="m3u8-item-action progress" style="display:none;" title="${T.downloading}"></span>
+                <span class="m3u8-item-action stop-btn" style="display:none;" title="${T.stop}">${T.stop}</span>
+            `;
 
-    function sleep(t) {
-        return new Promise(resolve => setTimeout(resolve, t));
-    }
+            let cancelDownload = null;
+            const downloadBtn = div.querySelector('.download-btn');
+            const playBtn = div.querySelector('.play-btn');
+            const stopBtn = div.querySelector('.stop-btn');
+            const progressText = div.querySelector('.progress');
+            const copyBtn = div.querySelector('.copy-link');
 
+            copyBtn.addEventListener('click', async () => {
+                await mgmapi.copyText(url.href);
+                mgmapi.message(T.copied, 2000);
+            });
 
-})();
+            downloadBtn.addEventListener('click', () => {
+                void startDownload({
+                    url: url.href,
+                    preferredTemplate: appSettings.downloaderTemplate,
+                    fallbackName: inferDownloadName(url.href, fallbackExtension),
+                    itemApi
+                });
+            });
+
+            if (playBtn) {
+                playBtn.addEventListener('click', async () => {
+                    if (await tryOpenTemplate(appSettings.primaryPlayerTemplate, url.href)) return;
+                    if (await tryOpenTemplate(appSettings.secondaryPlayerTemplate, url.href)) return;
+                    if ((appSettings.primaryPlayerTemplate && !isTemplateUsable(appSettings.primaryPlayerTemplate))
+                        || (appSettings.secondaryPlayerTemplate && !isTemplateUsable(appSettings.secondaryPlayerTemplate))) {
+                        mgmapi.message(T.invalidTemplate, 3000);
+                    }
+                    await mgmapi.copyText(url.href);
+                    mgmapi.message(T.openFailed, 3000);
+                });
+            }
+
+            stopBtn.addEventListener('click', () => {
+                if (cancelDownload) cancelDownload();
+            });
+
+            rootDiv.style.display = 'block';
+            itemCount += 1;
+            barBtn.setAttribute('data-number', String(itemCount));
+            wrapper.appendChild(div);
+
+            const itemApi = {
+                updateDownloadState({ downloading, progress, cancel }) {
+                    if (downloading) {
+                        if (cancel) cancelDownload = cancel;
+                        downloadBtn.style.display = 'none';
+                        progressText.style.display = '';
+                        progressText.textContent = `${T.downloading} ${progress}%`;
+                        stopBtn.style.display = '';
+                    } else {
+                        cancelDownload = null;
+                        downloadBtn.style.display = '';
+                        progressText.style.display = 'none';
+                        stopBtn.style.display = 'none';
+                    }
+                }
+            };
+
+            return itemApi;
+        }
+
+        async function startDownload({ url, preferredTemplate, fallbackName, itemApi }) {
+            if (preferredTemplate && await tryOpenTemplate(preferredTemplate, url)) {
+                return;
+            }
+            if (preferredTemplate && !isTemplateUsable(preferredTemplate)) {
+                mgmapi.message(T.invalidTemplate, 3000);
+            }
+
+            itemApi.updateDownloadState({ downloading: true, progress: 0 });
+            mgmapi.message(T.nativeDownload, 2000);
+
+            let controller = null;
+            controller = mgmapi.download({
+                url,
+                name: fallbackName,
+                reportProgress(progress) {
+                    itemApi.updateDownloadState({ downloading: true, progress, cancel: controller ? controller.cancel : null });
+                },
+                onComplete() {
+                    itemApi.updateDownloadState({ downloading: false, progress: 100 });
+                },
+                onError() {
+                    itemApi.updateDownloadState({ downloading: false, progress: 0 });
+                    mgmapi.copyText(url);
+                    mgmapi.message(T.copiedAsFallback, 3000);
+                },
+                onStop() {
+                    itemApi.updateDownloadState({ downloading: false, progress: 0 });
+                }
+            });
+
+            itemApi.updateDownloadState({ downloading: true, progress: 0, cancel: controller.cancel });
+        }
+
+        function isTemplateUsable(template) {
+            return Boolean(normalizeCommandTemplate(template) || normalizeTemplateForLaunch(template));
+        }
+
+        function isActionConfigured(template) {
+            return Boolean(String(template || '').trim()) && isTemplateUsable(template);
+        }
+
+        async function tryOpenTemplate(template, rawUrl) {
+            const normalizedCommandTemplate = normalizeCommandTemplate(template);
+            if (normalizedCommandTemplate) {
+                return await tryBridgeCommand(normalizedCommandTemplate, rawUrl);
+            }
+
+            const normalizedTemplate = normalizeTemplateForLaunch(template);
+            if (!normalizedTemplate) return false;
+            if (normalizedTemplate === 'native:open') {
+                window.open(rawUrl, '_blank', 'noopener,noreferrer');
+                return true;
+            }
+
+            const values = {
+                url: encodeURIComponent(rawUrl),
+                rawUrl,
+                pageUrl: encodeURIComponent(location.href),
+                rawPageUrl: location.href,
+                title: encodeURIComponent(document.title || ''),
+                rawTitle: document.title || '',
+                host: (() => { try { return new URL(rawUrl).host; } catch { return ''; } })(),
+                filename: inferDownloadName(rawUrl, ''),
+                extension: (() => {
+                    const filename = inferDownloadName(rawUrl, '');
+                    const match = filename.match(/(\.[^.]+)$/);
+                    return match ? match[1] : '';
+                })()
+            };
+            const target = fillTemplate(normalizedTemplate, values).trim();
+            if (!target) return false;
+
+            const link = document.createElement('a');
+            link.href = target;
+            link.style.display = 'none';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            return true;
+        }
+
+        async function tryBridgeCommand(commandTemplate, rawUrl) {
+            if (!appSettings.commandBridgeToken) {
+                mgmapi.message(T.bridgeTokenMissing, 3000);
+                return false;
+            }
+
+            const bridgeUrl = String(appSettings.commandBridgeUrl || '').trim();
+            if (!bridgeUrl) {
+                mgmapi.message(T.bridgeLaunchFailed, 3000);
+                return false;
+            }
+
+            try {
+                await new Promise((resolve, reject) => {
+                    mgmapi.xmlHttpRequest({
+                        method: 'POST',
+                        url: `${bridgeUrl.replace(/\/$/, '')}/launch`,
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'X-Bridge-Token': appSettings.commandBridgeToken
+                        },
+                        data: JSON.stringify({
+                            commandTemplate,
+                            rawUrl,
+                            pageUrl: location.href,
+                            title: document.title || ''
+                        }),
+                        onload(response) {
+                            if (response.status >= 200 && response.status < 300) {
+                                resolve();
+                            } else {
+                                reject(new Error(`Bridge failed: ${response.status}`));
+                            }
+                        },
+                        onerror(error) {
+                            reject(error);
+                        }
+                    });
+                });
+                mgmapi.message(T.sentToBridge, 1800);
+                return true;
+            } catch (error) {
+                console.error(error);
+                mgmapi.message(T.bridgeLaunchFailed, 3000);
+                return false;
+            }
+        }
+
+        function whenDOMReady(callback) {
+            if (document.body) callback();
+            else window.addEventListener('DOMContentLoaded', function listener() {
+                window.removeEventListener('DOMContentLoaded', listener);
+                callback();
+            });
+        }
+    })();
+}
