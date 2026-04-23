@@ -752,7 +752,7 @@
                     url: new URL(src),
                     duration: `${Math.ceil(v.duration * 10 / 60) / 10} ${T.mins}`,
                     download() {
-                        window.open(src);
+                        openWithLocalApp(src, 'fdm');
                     }
                 })
             }
@@ -786,7 +786,7 @@
             url,
             duration: manifest.duration ? `${Math.ceil(manifest.duration * 10 / 60) / 10} ${T.mins}` : manifest.playlists ? `${T.multiLine}(${manifest.playlists.length})` : "未知(unknown)",
             download() {
-                window.open(url.href);
+                openWithLocalApp(url.href, 'fdm');
             },
             play() {
                 openWithLocalApp(url.href, 'iina') || openWithLocalApp(url.href, 'vlc');
@@ -877,7 +877,7 @@
             mgmapi.message(T.copied, 2000);
         });
 
-        downloadBtn.addEventListener("click", download);
+        downloadBtn.addEventListener("click", () => download(videoObj));
         if (playBtn) playBtn.addEventListener("click", play);
 
         stopBtn.addEventListener("click", () => {
