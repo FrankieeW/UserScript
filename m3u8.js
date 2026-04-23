@@ -500,23 +500,7 @@
         }
     });
 
-    function getTopTitle() {
-        return new Promise(resolve => {
-            window.addEventListener("message", async function l(e) {
-                if (typeof e.data === "string") {
-                    if (e.data.startsWith("3j4t9uj349-gm-top-title-name:")) {
-                        let name = e.data.slice("3j4t9uj349-gm-top-title-name:".length);
-                        await new Promise(r => setTimeout(r, 5)); // 等5毫秒 确定 setValue 已经写入
-                        resolve(await mgmapi.getValue(name));
-                        mgmapi.deleteValue(name);
-                        window.removeEventListener("message", l);
-                    }
-                }
-            });
-            window.top.postMessage("3j4t9uj349-gm-get-title", "*");
-        });
-    }
-
+    
 
     {
 
@@ -763,7 +747,7 @@
                 const src = v.src;
 
                 shownUrls.push(src);
-                let { updateDownloadState } = showVideo({
+                showVideo({
                     type: "video",
                     url: new URL(src),
                     duration: `${Math.ceil(v.duration * 10 / 60) / 10} ${T.mins}`,
@@ -801,8 +785,10 @@
             type: "m3u8",
             url,
             duration: manifest.duration ? `${Math.ceil(manifest.duration * 10 / 60) / 10} ${T.mins}` : manifest.playlists ? `${T.multiLine}(${manifest.playlists.length})` : "未知(unknown)",
-            async download() {
-                // 用本地播放器打开 m3u8（IINA > VLC）
+            download() {
+                window.open(url.href);
+            },
+            play() {
                 openWithLocalApp(url.href, 'iina') || openWithLocalApp(url.href, 'vlc');
             }
         })
@@ -813,7 +799,8 @@
         type,
         url,
         duration,
-        download
+        download,
+        play
     }) {
         let div = document.createElement("div");
         div.className = "m3u8-item";
@@ -852,6 +839,12 @@
                     margin-left: 10px;
                     cursor: pointer;
             ">${T.download}</span>
+            ${play ? `<span
+                class="play-btn"
+                style="
+                    margin-left: 10px;
+                    cursor: pointer;
+            ">${T.play}</span>` : ''}
             <span>
                 <span
                     class="progress"
@@ -874,6 +867,7 @@
         let cancelDownload;
 
         let downloadBtn = div.querySelector(".download-btn");
+        let playBtn = div.querySelector(".play-btn");
         let stopBtn = div.querySelector(".stop-btn");
         let progressText = div.querySelector(".progress");
 
@@ -884,6 +878,7 @@
         });
 
         downloadBtn.addEventListener("click", download);
+        if (playBtn) playBtn.addEventListener("click", play);
 
         stopBtn.addEventListener("click", () => {
             cancelDownload && cancelDownload();
@@ -970,15 +965,7 @@
         return true;
     }
 
-    // 统一入口：打开链接到指定应用
-    function openUrlWith(url, type, appKey) {
-        if (type === 'video') {
-            openWithLocalApp(url, appKey || 'fdm');
-        } else {
-            openWithLocalApp(url, appKey || 'iina');
-        }
-    }
-
+    
     const reg = /magnet:\?xt=urn:btih:\w{10,}([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/;
 
     whenDOMReady(() => {
@@ -1198,14 +1185,6 @@
         if (document.body) f();
         else window.addEventListener("DOMContentLoaded", function l() {
             window.removeEventListener("DOMContentLoaded", l);
-            f();
-        });
-    }
-
-    function whenLoad(f) {
-        if (document.body) f();
-        else window.addEventListener("load", function l() {
-            window.removeEventListener("load", l);
             f();
         });
     }

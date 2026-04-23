@@ -32,8 +32,14 @@
   "hotPaths": [
     {
       "path": "m3u8.js",
-      "accessCount": 23,
-      "lastAccessed": 1776977996310,
+      "accessCount": 47,
+      "lastAccessed": 1776978682277,
+      "type": "file"
+    },
+    {
+      "path": "CLAUDE.md",
+      "accessCount": 1,
+      "lastAccessed": 1776978523516,
       "type": "file"
     }
   ],
