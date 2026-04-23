@@ -922,7 +922,7 @@
             label: 'VLC'
         },
         fdm: {
-            scheme: 'fdm://add?url=',
+            scheme: '',
             label: 'FDM'
         }
     };
