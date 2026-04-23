@@ -11,10 +11,10 @@
 // @icon         https://tools.thatwind.com/favicon.png
 // @author       Frankie
 // @namespace    https://tools.thatwind.com/
-// @homepage     https://tools.thatwind.com/tool/m3u8downloader
+// @homepage     https://github.com/FrankieeW/UserScript
 // @match        *://*/*
 // @exclude      *://www.diancigaoshou.com/*
-// @require      https://cdn.jsdelivr.net/npm/m3u8-parser@4.7.1/dist/m3u8-parser.min.js
+// @require      https://cdn.jsdelivr.net/npm/m3u8-parser@7.2.0/dist/m3u8-parser.min.js
 // @connect      *
 // @grant        unsafeWindow
 // @grant        GM_openInTab
@@ -877,7 +877,7 @@
             mgmapi.message(T.copied, 2000);
         });
 
-        downloadBtn.addEventListener("click", () => download(videoObj));
+        downloadBtn.addEventListener("click", download);
         if (playBtn) playBtn.addEventListener("click", play);
 
         stopBtn.addEventListener("click", () => {
